@@ -1687,7 +1687,7 @@ class NodeClam {
                     const { isInfected, viruses } = self._processResult(stdout, path);
 
                     if (err) {
-                        // Error code 1 means viruses were found...
+                        // Error code 1 means viruses were found
                         if (Object.prototype.hasOwnProperty.call(err, 'code') && err.code === 1) {
                             return hasCb
                                 ? endCb(null, [], [path], viruses)
