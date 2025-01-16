@@ -1,3 +1,4 @@
+/* eslint-disable prettier/prettier */
 /* eslint-disable no-control-regex */
 /* eslint-disable no-async-promise-executor */
 /*!
@@ -14,7 +15,7 @@ const nodePath = require('path'); // renamed to prevent conflicts in `scanDir`
 const tls = require('tls');
 const { promisify } = require('util');
 const { execFile } = require('child_process');
-const { PassThrough, Transform, Readable } = require('stream');
+const { Readable } = require('stream');
 const { Socket } = require('dgram');
 const fsPromises = require('fs').promises;
 const NodeClamError = require('./lib/NodeClamError');
@@ -654,19 +655,6 @@ class NodeClam {
     }
 
     /**
-     * Really basic method to check if the configured `host` is actually the localhost
-     * machine. It's not flawless but a decently acurate check for our purposes.
-     *
-     * @private
-     * @returns {boolean} Returns `true` if the clamdscan host is local, `false` if not.
-     * @example
-     * const isLocal = this._isLocalHost();
-     */
-    _isLocalHost() {
-        return ['127.0.0.1', 'localhost', os.hostname()].includes(this.settings.clamdscan.host);
-    }
-
-    /**
      * Test to see if ab object is a readable stream.
      *
      * @private
@@ -779,6 +767,73 @@ class NodeClam {
         }
 
         return { isInfected: null, viruses: [], file, resultString: result, timeout };
+    }
+
+    /**
+     * Quick check to see if the remote/local socket is working. Callback/Resolve
+     * response is an instance to a ClamAV socket client.
+     *
+     * @public
+     * @name ping
+     * @param {Function} [cb] - What to do after the ping
+     * @returns {Promise<object>} A copy of the Socket/TCP client
+     */
+    ping(cb) {
+        let hasCb = false;
+
+        // Verify second param, if supplied, is a function
+        if (cb && typeof cb !== 'function')
+            throw new NodeClamError('Invalid cb provided to ping. Second parameter must be a function!');
+
+        // Making things simpler
+        if (cb && typeof cb === 'function') hasCb = true;
+
+        // Setup the socket client variable
+        let client;
+
+        // eslint-disable-next-line consistent-return
+        return new Promise(async (resolve, reject) => {
+            try {
+                client = await this._initSocket('ping');
+
+                if (this.settings.debugMode)
+                    console.log(`${this.debugLabel}: Established connection to clamscan server!`);
+
+                client.write('PING');
+
+                let dataReceived = false;
+                client.on('end', () => {
+                    if (!dataReceived) {
+                        const err = new NodeClamError('Did not get a PONG response from clamscan server.');
+                        if (hasCb) cb(err, null);
+                        else reject(err);
+                    }
+                });
+
+                client.on('data', (data) => {
+                    if (data.toString().trim() === 'PONG') {
+                        dataReceived = true;
+                        if (this.settings.debugMode) console.log(`${this.debugLabel}: PONG!`);
+                        return hasCb ? cb(null, client) : resolve(client);
+                    }
+
+                    // I'm not even sure this case is possible, but...
+                    const err = new NodeClamError(
+                        data,
+                        'Could not establish connection to the remote clamscan server.'
+                    );
+                    return hasCb ? cb(err, null) : reject(err);
+                });
+                client.on('error', (err) => {
+                    if (this.settings.debugMode) {
+                        console.log(`${this.debugLabel}: Could not connect to the clamscan server.`, err);
+                    }
+                    return hasCb ? cb(err, null) : reject(err);
+                });
+            } catch (err) {
+                return hasCb ? cb(err, false) : reject(err);
+            }
+        });
     }
 
     /**
@@ -1108,374 +1163,6 @@ class NodeClam {
     }
 
     /**
-     * Returns a PassthroughStream object which allows you to
-     * pipe a ReadbleStream through it and on to another output. In the case of this
-     * implementation, it's actually forking the data to also
-     * go to ClamAV via TCP or Domain Sockets. Each data chunk is only passed on to
-     * the output if that chunk was successfully sent to and received by ClamAV.
-     * The PassthroughStream object returned from this method has a special event
-     * that is emitted when ClamAV finishes scanning the streamed data (`scan-complete`)
-     * so that you can decide if there's anything you need to do with the final output
-     * destination (ex. delete a file or S3 object).
-     *
-     * @public
-     * @returns {Transform} A Transform stream for piping a Readable stream into
-     * @example
-     * const NodeClam = require('clamscan');
-     *
-     * // You'll need to specify your socket or TCP connection info
-     * const clamscan = new NodeClam().init({
-     *     clamdscan: {
-     *         socket: '/var/run/clamd.scan/clamd.sock',
-     *         host: '127.0.0.1',
-     *         port: 3310,
-     *     }
-     * });
-     *
-     * // For example's sake, we're using the Axios module
-     * const axios = require('axios');
-     *
-     * // Get a readable stream for a URL request
-     * const input = axios.get(someUrl);
-     *
-     * // Create a writable stream to a local file
-     * const output = fs.createWriteStream(someLocalFile);
-     *
-     * // Get instance of this module's PassthroughStream object
-     * const av = clamscan.passthrough();
-     *
-     * // Send output of Axios stream to ClamAV.
-     * // Send output of Axios to `someLocalFile` if ClamAV receives data successfully
-     * input.pipe(av).pipe(output);
-     *
-     * // What happens when scan is completed
-     * av.on('scan-complete', result => {
-     *    const {isInfected, viruses} = result;
-     *    // Do stuff if you want
-     * });
-     *
-     * // What happens when data has been fully written to `output`
-     * output.on('finish', () => {
-     *     // Do stuff if you want
-     * });
-     *
-     * // NOTE: no errors (or other events) are being handled in this example but standard errors will be emitted according to NodeJS's Stream specifications
-     */
-    passthrough() {
-        const me = this;
-        // A chunk counter for debugging
-        let _scanComplete = false;
-        let _avWaiting = null;
-        let _avScanTime = false;
-
-        // DRY method for clearing the interval and counter related to scan times
-        const clearScanBenchmark = () => {
-            if (_avWaiting) clearInterval(_avWaiting);
-            _avWaiting = null;
-            _avScanTime = 0;
-        };
-
-        // Return a Transform stream so this can act as a "man-in-the-middle"
-        // for the streaming pipeline.
-        // Ex. uploadStream.pipe(<this_transform_stream>).pipe(destination_stream)
-        return new Transform({
-            // This should be fired on each chunk received
-            transform(chunk, encoding, cb) {
-                // DRY method for handling each chunk as it comes in
-                const doTransform = () => {
-                    // Write data to our fork stream. If it fails,
-                    // emit a 'drain' event
-                    if (!this._forkStream.write(chunk)) {
-                        this._forkStream.once('drain', () => {
-                            cb(null, chunk);
-                        });
-                    } else {
-                        // Push data back out to whatever is listening (if anything)
-                        // and let Node know we're ready for more data
-                        cb(null, chunk);
-                    }
-                };
-
-                // DRY method for handling errors when they arise from the
-                // ClamAV Socket connection
-                const handleError = (err, isInfected = null, result = null) => {
-                    this._forkStream.unpipe();
-                    this._forkStream.destroy();
-                    this._clamavTransform.destroy();
-                    if (this._clamavSocket) {
-                        this._clamavSocket.end();
-                    }
-                    clearScanBenchmark();
-
-                    // Finding an infected file isn't really an error...
-                    if (isInfected === true) {
-                        if (_scanComplete === false) {
-                            _scanComplete = true;
-                            this.emit('scan-complete', result);
-                        }
-                        this.emit('stream-infected', result); // just another way to catch an infected stream
-                    } else {
-                        this.emit('error', err || new NodeClamError(result));
-                    }
-                };
-
-                // If we haven't initialized a socket connection to ClamAV yet,
-                // now is the time...
-                if (!this._clamavSocket) {
-                    // We're using a PassThrough stream as a middle man to fork the input
-                    // into two paths... (1) ClamAV and (2) The final destination.
-                    this._forkStream = new PassThrough();
-                    // Instantiate our custom Transform stream that coddles
-                    // chunks into the correct format for the ClamAV socket.
-                    this._clamavTransform = new NodeClamTransform({}, me.settings.debugMode);
-                    // Setup an array to collect the responses from ClamAV
-                    this._clamavResponseChunks = [];
-
-                    // Get a connection to the ClamAV Socket
-                    me._initSocket('passthrough').then(
-                        (socket) => {
-                            this._clamavSocket = socket;
-
-                            if (me.settings.debugMode) console.log(`${me.debugLabel}: ClamAV Socket Initialized...`);
-
-                            // Setup a pipeline that will pass chunks through our custom Tranform and on to ClamAV
-                            this._forkStream.pipe(this._clamavTransform).pipe(this._clamavSocket);
-
-                            // When the CLamAV socket connection is closed (could be after 'end' or because of an error)...
-                            this._clamavSocket
-                                .on('close', (hadError) => {
-                                    if (me.settings.debugMode)
-                                        console.log(
-                                            `${me.debugLabel}: ClamAV socket has been closed! Because of Error:`,
-                                            hadError
-                                        );
-                                    this._clamavSocket.end();
-                                })
-                                // When the ClamAV socket connection ends (receives chunk)
-                                .on('end', () => {
-                                    this._clamavSocket.end();
-                                    if (me.settings.debugMode)
-                                        console.log(`${me.debugLabel}: ClamAV socket has received the last chunk!`);
-                                    // Process the collected chunks
-                                    const response = Buffer.concat(this._clamavResponseChunks);
-                                    const result = me._processResult(response.toString('utf8'), null);
-                                    this._clamavResponseChunks = [];
-                                    if (me.settings.debugMode) {
-                                        console.log(`${me.debugLabel}: Result of scan:`, result);
-                                        console.log(
-                                            `${me.debugLabel}: It took ${_avScanTime} seconds to scan the file(s).`
-                                        );
-                                        clearScanBenchmark();
-                                    }
-
-                                    // If the scan timed-out
-                                    if (result.timeout === true) this.emit('timeout');
-
-                                    // NOTE: "scan-complete" could be called by the `handleError` method.
-                                    // We don't want to to double-emit this message.
-                                    if (_scanComplete === false) {
-                                        _scanComplete = true;
-                                        this._clamavSocket.end();
-                                        this.emit('scan-complete', result);
-                                    }
-                                })
-                                // If connection timesout.
-                                .on('timeout', () => {
-                                    this.emit('timeout', new Error('Connection to host/socket has timed out'));
-                                    this._clamavSocket.end();
-                                    if (me.settings.debugMode)
-                                        console.log(`${me.debugLabel}: Connection to host/socket has timed out`);
-                                })
-                                // When the ClamAV socket is ready to receive packets (this will probably never fire here)
-                                .on('ready', () => {
-                                    if (me.settings.debugMode)
-                                        console.log(`${me.debugLabel}: ClamAV socket ready to receive`);
-                                })
-                                // When we are officially connected to the ClamAV socket (probably will never fire here)
-                                .on('connect', () => {
-                                    if (me.settings.debugMode)
-                                        console.log(`${me.debugLabel}: Connected to ClamAV socket`);
-                                })
-                                // If an error is emitted from the ClamAV socket
-                                .on('error', (err) => {
-                                    console.error(`${me.debugLabel}: Error emitted from ClamAV socket: `, err);
-                                    handleError(err);
-                                })
-                                // If ClamAV is sending stuff to us (ie, an "OK", "Virus FOUND", or "ERROR")
-                                .on('data', (cvChunk) => {
-                                    // Push this chunk to our results collection array
-                                    this._clamavResponseChunks.push(cvChunk);
-                                    if (me.settings.debugMode)
-                                        console.log(`${me.debugLabel}: Got result!`, cvChunk.toString());
-
-                                    // Parse what we've gotten back from ClamAV so far...
-                                    const response = Buffer.concat(this._clamavResponseChunks);
-                                    const result = me._processResult(response.toString(), null);
-
-                                    // If there's an error supplied or if we detect a virus or timeout, stop stream immediately.
-                                    if (
-                                        result instanceof NodeClamError ||
-                                        (typeof result === 'object' &&
-                                            (('isInfected' in result && result.isInfected === true) ||
-                                                ('timeout' in result && result.timeout === true)))
-                                    ) {
-                                        // If a virus is detected...
-                                        if (
-                                            typeof result === 'object' &&
-                                            'isInfected' in result &&
-                                            result.isInfected === true
-                                        ) {
-                                            handleError(null, true, result);
-                                        }
-
-                                        // If a timeout is detected...
-                                        else if (
-                                            typeof result === 'object' &&
-                                            'isInfected' in result &&
-                                            result.isInfected === false
-                                        ) {
-                                            this.emit('timeout');
-                                            handleError(null, false, result);
-                                        }
-
-                                        // If any other kind of error is detected...
-                                        else {
-                                            handleError(result);
-                                        }
-                                    }
-                                    // For debugging purposes, spit out what was processed (if anything).
-                                    else if (me.settings.debugMode)
-                                        console.log(
-                                            `${me.debugLabel}: Processed Result: `,
-                                            result,
-                                            response.toString()
-                                        );
-                                });
-
-                            if (me.settings.debugMode) console.log(`${me.debugLabel}: Doing initial transform!`);
-                            // Handle the chunk
-                            doTransform();
-                        },
-                        (err) => {
-                            // Close socket if it's currently valid
-                            if (
-                                this._clamavSocket &&
-                                'readyState' in this._clamavSocket &&
-                                this._clamavSocket.readyState
-                            ) {
-                                this._clamavSocket.end();
-                            }
-
-                            // If there's an issue connecting to the ClamAV socket, this is where that's handled
-                            if (me.settings.debugMode)
-                                console.error(`${me.debugLabel}: Error initiating socket to ClamAV: `, err);
-                            handleError(err);
-                        }
-                    );
-                } else {
-                    // if (me.settings.debugMode) console.log(`${me.debugLabel}: Doing transform: ${++counter}`);
-                    // Handle the chunk
-                    doTransform();
-                }
-            },
-
-            // This is what is called when the input stream has dried up
-            flush(cb) {
-                if (me.settings.debugMode) console.log(`${me.debugLabel}: Done with the full pipeline.`);
-
-                // Keep track of how long it's taking to scan a file..
-                _avWaiting = null;
-                _avScanTime = 0;
-                if (me.settings.debugMode) {
-                    _avWaiting = setInterval(() => {
-                        _avScanTime += 1;
-                        if (_avScanTime % 5 === 0)
-                            console.log(`${me.debugLabel}: ClamAV has been scanning for ${_avScanTime} seconds...`);
-                    }, 1000);
-                }
-
-                // @todo: Investigate why this needs to be done in order
-                // for the ClamAV socket to be closed (why NodeClamTransform's
-                // `_flush` method isn't getting called)
-                // If the incoming stream is empty, transform() won't have been called, so we won't
-                // have a socket here.
-                if (this._clamavSocket && this._clamavSocket.writable === true) {
-                    const size = Buffer.alloc(4);
-                    size.writeInt32BE(0, 0);
-                    this._clamavSocket.write(size, cb);
-                }
-            },
-        });
-    }
-
-    /**
-     * Quick check to see if the remote/local socket is working. Callback/Resolve
-     * response is an instance to a ClamAV socket client.
-     *
-     * @public
-     * @name ping
-     * @param {Function} [cb] - What to do after the ping
-     * @returns {Promise<object>} A copy of the Socket/TCP client
-     */
-    ping(cb) {
-        let hasCb = false;
-
-        // Verify second param, if supplied, is a function
-        if (cb && typeof cb !== 'function')
-            throw new NodeClamError('Invalid cb provided to ping. Second parameter must be a function!');
-
-        // Making things simpler
-        if (cb && typeof cb === 'function') hasCb = true;
-
-        // Setup the socket client variable
-        let client;
-
-        // eslint-disable-next-line consistent-return
-        return new Promise(async (resolve, reject) => {
-            try {
-                client = await this._initSocket('ping');
-
-                if (this.settings.debugMode)
-                    console.log(`${this.debugLabel}: Established connection to clamscan server!`);
-
-                client.write('PING');
-
-                let dataReceived = false;
-                client.on('end', () => {
-                    if (!dataReceived) {
-                        const err = new NodeClamError('Did not get a PONG response from clamscan server.');
-                        if (hasCb) cb(err, null);
-                        else reject(err);
-                    }
-                });
-
-                client.on('data', (data) => {
-                    if (data.toString().trim() === 'PONG') {
-                        dataReceived = true;
-                        if (this.settings.debugMode) console.log(`${this.debugLabel}: PONG!`);
-                        return hasCb ? cb(null, client) : resolve(client);
-                    }
-
-                    // I'm not even sure this case is possible, but...
-                    const err = new NodeClamError(
-                        data,
-                        'Could not establish connection to the remote clamscan server.'
-                    );
-                    return hasCb ? cb(err, null) : reject(err);
-                });
-                client.on('error', (err) => {
-                    if (this.settings.debugMode) {
-                        console.log(`${this.debugLabel}: Could not connect to the clamscan server.`, err);
-                    }
-                    return hasCb ? cb(err, null) : reject(err);
-                });
-            } catch (err) {
-                return hasCb ? cb(err, false) : reject(err);
-            }
-        });
-    }
-
-    /**
      * Just an alias to `isInfected`. See docs for that for usage examples.
      *
      * @public
@@ -1565,13 +1252,13 @@ class NodeClam {
             let errors = {};
             let goodFiles = [];
             let badFiles = [];
-            let viruses = [];
+            let virus = [];
             let origNumFiles = 0;
 
             // The function that parses the stdout from clamscan/clamdscan
             const parseStdout = (err, stdout) => {
                 // Get Virus List
-                viruses = stdout
+                virus = stdout
                     .trim()
                     .split(String.fromCharCode(10))
                     .map((v) => (/FOUND\n?$/.test(v) ? v.replace(/(.+):\s+(.+)FOUND\n?$/, '$2').trim() : null))
@@ -1591,6 +1278,9 @@ class NodeClam {
                             path = pathMatch[1];
                         }
 
+                        if (/\s+EPERM(\u0000|[\r\n])?$/.test(result)) {
+                            return;
+                        }
                         // eslint-disable-next-line no-control-regex
                         if (/\s+OK(\u0000|[\r\n])?$/.test(result)) {
                             if (self.settings.debugMode) console.log(`${this.debugLabel}: ${path} is OK!`);
@@ -1603,12 +1293,12 @@ class NodeClam {
 
                 badFiles = Array.from(new Set(badFiles));
                 goodFiles = Array.from(new Set(goodFiles));
-                viruses = Array.from(new Set(viruses));
+                virus = Array.from(new Set(virus));
 
                 if (err) return hasCb ? endCb(err, [], badFiles, {}, []) : reject(new NodeClamError({ badFiles }, err));
                 return hasCb
-                    ? endCb(null, goodFiles, badFiles, errors, viruses)
-                    : resolve({ goodFiles, badFiles, viruses, errors });
+                    ? endCb(null, goodFiles, badFiles, errors, virus)
+                    : resolve({ goodFiles, badFiles, viruses: virus, errors });
             };
 
             // Use this method when scanning using local binaries
@@ -1681,14 +1371,23 @@ class NodeClam {
                         // Scan 10 files then move to the next set...
                         // eslint-disable-next-line no-await-in-loop
                         const chunkResults = await Promise.all(
-                            chunk.map((file) => this.isInfected(file).catch((e) => e))
+                            chunk.map(async (file) => {
+                                try {
+                                    const result = await this.isInfected(file);
+                                    return result; // Include the full result object
+                                } catch (err) {
+                                    return { err, file, isInfected: null, viruses: [] };
+                                }
+                            })
                         );
 
                         // Re-map results back to their filenames
-                        const chunkResultsMapped = chunkResults.map((v, i) => [chunk[i], v]);
+                        const chunkResultsMapped = chunkResults.map((result, i) => ({ ...result, file: chunk[i] }));
 
                         // Trigger file-callback for each file that was just scanned
-                        chunkResultsMapped.forEach((v) => fileCb(null, v[0], v[1]));
+                        chunkResultsMapped.forEach(({ err, file, isInfected, viruses }) =>
+                            fileCb(err, file, isInfected, viruses)
+                        );
 
                         // Add mapped chunk results to overall scan results array
                         results = results.concat(chunkResultsMapped);
@@ -1776,7 +1475,7 @@ class NodeClam {
                             else if (typeof v[1] === 'object' && 'isInfected' in v[1] && v[1].isInfected === true) {
                                 badFiles.push(v[1].file);
                                 if ('viruses' in v[1] && Array.isArray(v[1].viruses) && v[1].viruses.length > 0) {
-                                    viruses = viruses.concat(v[1].viruses);
+                                    virus = virus.concat(v[1].viruses);
                                 }
                             } else if (typeof v[1] === 'object' && 'isInfected' in v[1] && v[1].isInfected === false) {
                                 goodFiles.push(v[1].file);
@@ -1786,18 +1485,18 @@ class NodeClam {
                         // Make sure the list of bad and good files is unique...(just for good measure)
                         badFiles = Array.from(new Set(badFiles));
                         goodFiles = Array.from(new Set(goodFiles));
-                        viruses = Array.from(new Set(viruses));
+                        virus = Array.from(new Set(virus));
 
                         if (self.settings.debugMode) {
                             console.log(`${self.debugLabel}: Scan Complete!`);
                             console.log(`${self.debugLabel}: Num Bad Files: `, badFiles.length);
                             console.log(`${self.debugLabel}: Num Good Files: `, goodFiles.length);
-                            console.log(`${self.debugLabel}: Num Viruses: `, viruses.length);
+                            console.log(`${self.debugLabel}: Num Viruses: `, virus.length);
                         }
 
                         return hasCb
-                            ? endCb(null, goodFiles, badFiles, errors, viruses)
-                            : resolve({ errors, goodFiles, badFiles, viruses });
+                            ? endCb(null, goodFiles, badFiles, errors, virus)
+                            : resolve({ errors, goodFiles, badFiles, viruses: virus });
                     }
                     return localScan(allFiles);
                 };
@@ -2020,7 +1719,7 @@ class NodeClam {
             if (this.settings.scanRecursively === true && (typeof fileCb === 'function' || !hasCb)) {
                 try {
                     const files = await getFiles(path, true);
-                    const { goodFiles, badFiles, viruses, errors } = await this.scanFiles(files, null, null);
+                    const { goodFiles, badFiles, viruses, errors } = await this.scanFiles(files, null, fileCb);
                     return hasCb
                         ? endCb(null, goodFiles, badFiles, viruses)
                         : resolve({ goodFiles, badFiles, viruses, errors });
