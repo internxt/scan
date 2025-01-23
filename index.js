@@ -1,3 +1,6 @@
+/* eslint-disable prettier/prettier */
+/* eslint-disable consistent-return */
+/* eslint-disable no-loop-func */
 /* eslint-disable no-control-regex */
 /* eslint-disable no-async-promise-executor */
 /*!
@@ -758,6 +761,8 @@ class NodeClam {
             if (this.settings.debugMode) {
                 if (this.settings.debugMode) console.log(`${this.debugLabel}: Error Response: `, error);
                 if (this.settings.debugMode) console.log(`${this.debugLabel}: File may be INFECTED!`);
+
+                console.log('ERROR HERE CHEU: ', error);
             }
             return new NodeClamError({ error }, `An error occurred while scanning the piped-through stream: ${error}`);
         }
@@ -1681,17 +1686,26 @@ class NodeClam {
                         // Scan 10 files then move to the next set...
                         // eslint-disable-next-line no-await-in-loop
                         const chunkResults = await Promise.all(
-                            chunk.map((file) => this.isInfected(file).catch((e) => e))
+                            chunk.map(async (file) => {
+                                try {
+                                    const result = await this.isInfected(file);
+                                    return result;
+                                } catch (err) {
+                                    return { err, file, isInfected: null, viruses: [] };
+                                }
+                            })
                         );
 
                         // Re-map results back to their filenames
-                        const chunkResultsMapped = chunkResults.map((v, i) => [chunk[i], v]);
-
-                        // Trigger file-callback for each file that was just scanned
-                        chunkResultsMapped.forEach((v) => fileCb(null, v[0], v[1]));
-
+                        const chunkResultsMapped = chunkResults.map((result, i) => ({ ...result, file: chunk[i] }));
                         // Add mapped chunk results to overall scan results array
                         results = results.concat(chunkResultsMapped);
+
+                        // Trigger file-callback for each file that was just scanned
+                        chunkResultsMapped.forEach(({ err, file, isInfected, viruses: virus }) => {
+                            const progressRatio = ((results.length / numFiles) * 100).toFixed(2);
+                            fileCb(err, file, isInfected, virus, results.length, progressRatio);
+                        });
                     }
 
                     // Build out the good and bad files arrays
@@ -1902,6 +1916,7 @@ class NodeClam {
                     const data = (await fsReadfile(this.settings.fileList)).toString().split(os.EOL);
                     return doScan(data);
                 } catch (e) {
+                    console.log('ERROR IN DO SCAN WHILE SCANNING FILES: ', e);
                     const err = new NodeClamError(
                         { err: e, fileList: this.settings.fileList },
                         `No files provided and file list was provided but could not be found! ${e}`
@@ -1909,7 +1924,11 @@ class NodeClam {
                     return hasCb ? endCb(err, [], [], {}, []) : reject(err);
                 }
             } else {
-                return doScan(files);
+                try {
+                    return doScan(files);
+                } catch (error) {
+                    console.log('ERROR SCANNING FILES: ', error);
+                }
             }
         });
     }
@@ -2020,7 +2039,7 @@ class NodeClam {
             if (this.settings.scanRecursively === true && (typeof fileCb === 'function' || !hasCb)) {
                 try {
                     const files = await getFiles(path, true);
-                    const { goodFiles, badFiles, viruses, errors } = await this.scanFiles(files, null, null);
+                    const { goodFiles, badFiles, viruses, errors } = await this.scanFiles(files, null, fileCb);
                     return hasCb
                         ? endCb(null, goodFiles, badFiles, viruses)
                         : resolve({ goodFiles, badFiles, viruses, errors });
@@ -2133,6 +2152,7 @@ class NodeClam {
                                     : resolve({ path, isInfected, goodFiles, badFiles, viruses, numGoodFiles });
                             });
                     } catch (e) {
+                        console.log('ERROR IN SCAN DIR: ', e);
                         const err = new NodeClamError(
                             { path, err: e },
                             `There was an issue scanning the path provided: ${e}`
