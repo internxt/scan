@@ -1,6 +1,6 @@
 {
-    "name": "clamscan",
-    "version": "2.4.0",
+    "name": "@internxt/scan",
+    "version": "1.0.1",
     "author": "Kyle Farris <kyle.farris@infotechinc.com> (https://infotechinc.com)",
     "description": "Use Node JS to scan files on your server with ClamAV's clamscan/clamdscan binary or via TCP to a remote server or local UNIX Domain socket. This is especially useful for scanning uploaded files provided by un-trusted sources.",
     "main": "index.js",
@@ -57,5 +57,8 @@
         "jsdoc-to-markdown": "^9.0.4",
         "mocha": "^10.1.0",
         "prettier": "^3.2.5"
+    },
+    "dependencies": {
+        "p-limit": "3.1.0"
     }
 }

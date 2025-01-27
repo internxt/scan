@@ -1,4 +1,8 @@
 /* eslint-disable prettier/prettier */
+/* eslint-disable prefer-destructuring */
+/* eslint-disable no-plusplus */
+/* eslint-disable no-await-in-loop */
+/* eslint-disable no-restricted-syntax */
 /* eslint-disable consistent-return */
 /* eslint-disable no-loop-func */
 /* eslint-disable no-control-regex */
@@ -17,17 +21,19 @@ const nodePath = require('path'); // renamed to prevent conflicts in `scanDir`
 const tls = require('tls');
 const { promisify } = require('util');
 const { execFile } = require('child_process');
-const { PassThrough, Transform, Readable } = require('stream');
+const { Readable } = require('stream');
 const { Socket } = require('dgram');
 const fsPromises = require('fs').promises;
+const { stat } = require('fs/promises');
 const NodeClamError = require('./lib/NodeClamError');
 const NodeClamTransform = require('./lib/NodeClamTransform');
 const getFiles = require('./lib/getFiles');
+const isPermissionError = require('./lib/isPermissionError');
 
 // Re-named `fs` promise methods to prevent conflicts while keeping short names
 const fsAccess = fsPromises.access;
 const fsReadfile = fsPromises.readFile;
-const fsReaddir = fsPromises.readdir;
+// const fsReaddir = fsPromises.readdir;
 const fsStat = fsPromises.stat;
 
 // Convert some stuff to promises
@@ -68,7 +74,7 @@ class NodeClam {
                 socket: false,
                 host: false,
                 port: false,
-                timeout: 60000, // 60 seconds
+                timeout: 180000,
                 localFallback: true,
                 path: '/usr/bin/clamdscan',
                 configFile: null,
@@ -761,8 +767,6 @@ class NodeClam {
             if (this.settings.debugMode) {
                 if (this.settings.debugMode) console.log(`${this.debugLabel}: Error Response: `, error);
                 if (this.settings.debugMode) console.log(`${this.debugLabel}: File may be INFECTED!`);
-
-                console.log('ERROR HERE CHEU: ', error);
             }
             return new NodeClamError({ error }, `An error occurred while scanning the piped-through stream: ${error}`);
         }
@@ -783,7 +787,7 @@ class NodeClam {
             if (this.settings.debugMode) console.log(`${this.debugLabel}: File may be INFECTED!`);
         }
 
-        return { isInfected: null, viruses: [], file, resultString: result, timeout };
+        return { isInfected: false, viruses: [], file, resultString: result, timeout };
     }
 
     /**
@@ -913,7 +917,7 @@ class NodeClam {
      * const {file, isInfected, viruses} = await clamscan.isInfected('/a/picture/for_example.jpg');
      */
     isInfected(file = '', cb = null) {
-        const self = this;
+        // const self = this;
         let hasCb = false;
 
         // Verify second param, if supplied, is a function
@@ -937,58 +941,6 @@ class NodeClam {
             // Clean file name
             file = file.trim();
 
-            // This is the function used for scanning viruses using the clamd command directly
-            const localScan = () => {
-                if (self.settings.debugMode) console.log(`${this.debugLabel}: [Local Scan] Scanning ${file}`);
-                // Build the actual command to run
-                const args = self._buildClamArgs(file);
-                if (self.settings.debugMode)
-                    console.log(
-                        `${this.debugLabel}: Configured clam command: ${self.settings[self.scanner].path}`,
-                        args.join(' ')
-                    );
-
-                // Execute the clam binary with the proper flags
-                // NOTE: The async/await version of this will not allow us to capture the virus(es) name(s).
-                execFile(self.settings[self.scanner].path, args, (err, stdout, stderr) => {
-                    const { isInfected, viruses } = self._processResult(stdout, file);
-
-                    // It may be a real error or a virus may have been found.
-                    if (err) {
-                        // Code 1 is when a virus is found... It's not really an "error", per se...
-                        if (Object.prototype.hasOwnProperty.call(err, 'code') && err.code === 1) {
-                            return hasCb ? cb(null, file, true, viruses) : resolve({ file, isInfected, viruses });
-                        }
-                        const error = new NodeClamError(
-                            { file, err, isInfected: null },
-                            `There was an error scanning the file (ClamAV Error Code: ${err.code})`
-                        );
-                        if (self.settings.debugMode) console.log(`${this.debugLabel}`, error);
-                        return hasCb ? cb(error, file, null, []) : reject(error);
-                    }
-                    // Not sure in what scenario a `stderr` would show up, but, it's worth handling here
-                    if (stderr) {
-                        const error = new NodeClamError(
-                            { stderr, file },
-                            'The file was scanned but ClamAV responded with an unexpected response.'
-                        );
-                        if (self.settings.debugMode) console.log(`${this.debugLabel}: `, error);
-                        return hasCb ? cb(error, file, null, viruses) : resolve({ file, isInfected, viruses });
-                    }
-                    // No viruses were found!
-
-                    try {
-                        return hasCb ? cb(null, file, isInfected, viruses) : resolve({ file, isInfected, viruses });
-                    } catch (e) {
-                        const error = new NodeClamError(
-                            { file, err: e, isInfected: null },
-                            'There was an error processing the results from ClamAV'
-                        );
-                        return hasCb ? cb(error, file, null, []) : reject(error);
-                    }
-                });
-            };
-
             // See if we can find/read the file
             // -----
             // NOTE: Is it even valid to do this since, in theory, the
@@ -999,6 +951,7 @@ class NodeClam {
                 await fsAccess(file, fs.constants.R_OK);
             } catch (e) {
                 const err = new NodeClamError({ err: e, file }, 'Could not find file to scan!');
+
                 return hasCb ? cb(err, file, true) : reject(err);
             }
             // Make sure the "file" being scanned is actually a file and not a directory (or something else)
@@ -1063,7 +1016,7 @@ class NodeClam {
                                 client.end();
 
                                 // Fallback to local if that's an option
-                                if (this.settings.clamdscan.localFallback === true) return localScan();
+                                // if (this.settings.clamdscan.localFallback === true) return localScan();
 
                                 return hasCb ? cb(err, file, null, []) : reject(err);
                             }
@@ -1072,7 +1025,7 @@ class NodeClam {
                         if (client && 'readyState' in client && client.readyState) client.end();
 
                         // Fallback to local if that's an option
-                        if (this.settings.clamdscan.localFallback === true) return localScan();
+                        // if (this.settings.clamdscan.localFallback === true) return localScan();
 
                         return hasCb ? cb(err, file, null, []) : reject(err);
                     }
@@ -1088,9 +1041,7 @@ class NodeClam {
                         const isInfected = await this.scanStream(stream);
                         return hasCb ? cb(null, file, isInfected, []) : resolve({ ...isInfected, file });
                     } catch (e) {
-                        // Fallback to local if that's an option
-                        if (this.settings.clamdscan.localFallback === true) return await localScan();
-
+                        console.log('ERROR IN SCAN STREAM: ', e);
                         // Otherwise, fail
                         const err = new NodeClamError({ err: e, file }, 'Could not scan file via TCP or locally!');
                         return hasCb ? cb(err, file, null, []) : reject(err);
@@ -1100,316 +1051,6 @@ class NodeClam {
                     }
                 }
             }
-
-            // If the user just wants to scan locally...
-            else {
-                try {
-                    return await localScan();
-                } catch (err) {
-                    return hasCb ? cb(err, file, null) : reject(err);
-                }
-            }
-        });
-    }
-
-    /**
-     * Returns a PassthroughStream object which allows you to
-     * pipe a ReadbleStream through it and on to another output. In the case of this
-     * implementation, it's actually forking the data to also
-     * go to ClamAV via TCP or Domain Sockets. Each data chunk is only passed on to
-     * the output if that chunk was successfully sent to and received by ClamAV.
-     * The PassthroughStream object returned from this method has a special event
-     * that is emitted when ClamAV finishes scanning the streamed data (`scan-complete`)
-     * so that you can decide if there's anything you need to do with the final output
-     * destination (ex. delete a file or S3 object).
-     *
-     * @public
-     * @returns {Transform} A Transform stream for piping a Readable stream into
-     * @example
-     * const NodeClam = require('clamscan');
-     *
-     * // You'll need to specify your socket or TCP connection info
-     * const clamscan = new NodeClam().init({
-     *     clamdscan: {
-     *         socket: '/var/run/clamd.scan/clamd.sock',
-     *         host: '127.0.0.1',
-     *         port: 3310,
-     *     }
-     * });
-     *
-     * // For example's sake, we're using the Axios module
-     * const axios = require('axios');
-     *
-     * // Get a readable stream for a URL request
-     * const input = axios.get(someUrl);
-     *
-     * // Create a writable stream to a local file
-     * const output = fs.createWriteStream(someLocalFile);
-     *
-     * // Get instance of this module's PassthroughStream object
-     * const av = clamscan.passthrough();
-     *
-     * // Send output of Axios stream to ClamAV.
-     * // Send output of Axios to `someLocalFile` if ClamAV receives data successfully
-     * input.pipe(av).pipe(output);
-     *
-     * // What happens when scan is completed
-     * av.on('scan-complete', result => {
-     *    const {isInfected, viruses} = result;
-     *    // Do stuff if you want
-     * });
-     *
-     * // What happens when data has been fully written to `output`
-     * output.on('finish', () => {
-     *     // Do stuff if you want
-     * });
-     *
-     * // NOTE: no errors (or other events) are being handled in this example but standard errors will be emitted according to NodeJS's Stream specifications
-     */
-    passthrough() {
-        const me = this;
-        // A chunk counter for debugging
-        let _scanComplete = false;
-        let _avWaiting = null;
-        let _avScanTime = false;
-
-        // DRY method for clearing the interval and counter related to scan times
-        const clearScanBenchmark = () => {
-            if (_avWaiting) clearInterval(_avWaiting);
-            _avWaiting = null;
-            _avScanTime = 0;
-        };
-
-        // Return a Transform stream so this can act as a "man-in-the-middle"
-        // for the streaming pipeline.
-        // Ex. uploadStream.pipe(<this_transform_stream>).pipe(destination_stream)
-        return new Transform({
-            // This should be fired on each chunk received
-            transform(chunk, encoding, cb) {
-                // DRY method for handling each chunk as it comes in
-                const doTransform = () => {
-                    // Write data to our fork stream. If it fails,
-                    // emit a 'drain' event
-                    if (!this._forkStream.write(chunk)) {
-                        this._forkStream.once('drain', () => {
-                            cb(null, chunk);
-                        });
-                    } else {
-                        // Push data back out to whatever is listening (if anything)
-                        // and let Node know we're ready for more data
-                        cb(null, chunk);
-                    }
-                };
-
-                // DRY method for handling errors when they arise from the
-                // ClamAV Socket connection
-                const handleError = (err, isInfected = null, result = null) => {
-                    this._forkStream.unpipe();
-                    this._forkStream.destroy();
-                    this._clamavTransform.destroy();
-                    if (this._clamavSocket) {
-                        this._clamavSocket.end();
-                    }
-                    clearScanBenchmark();
-
-                    // Finding an infected file isn't really an error...
-                    if (isInfected === true) {
-                        if (_scanComplete === false) {
-                            _scanComplete = true;
-                            this.emit('scan-complete', result);
-                        }
-                        this.emit('stream-infected', result); // just another way to catch an infected stream
-                    } else {
-                        this.emit('error', err || new NodeClamError(result));
-                    }
-                };
-
-                // If we haven't initialized a socket connection to ClamAV yet,
-                // now is the time...
-                if (!this._clamavSocket) {
-                    // We're using a PassThrough stream as a middle man to fork the input
-                    // into two paths... (1) ClamAV and (2) The final destination.
-                    this._forkStream = new PassThrough();
-                    // Instantiate our custom Transform stream that coddles
-                    // chunks into the correct format for the ClamAV socket.
-                    this._clamavTransform = new NodeClamTransform({}, me.settings.debugMode);
-                    // Setup an array to collect the responses from ClamAV
-                    this._clamavResponseChunks = [];
-
-                    // Get a connection to the ClamAV Socket
-                    me._initSocket('passthrough').then(
-                        (socket) => {
-                            this._clamavSocket = socket;
-
-                            if (me.settings.debugMode) console.log(`${me.debugLabel}: ClamAV Socket Initialized...`);
-
-                            // Setup a pipeline that will pass chunks through our custom Tranform and on to ClamAV
-                            this._forkStream.pipe(this._clamavTransform).pipe(this._clamavSocket);
-
-                            // When the CLamAV socket connection is closed (could be after 'end' or because of an error)...
-                            this._clamavSocket
-                                .on('close', (hadError) => {
-                                    if (me.settings.debugMode)
-                                        console.log(
-                                            `${me.debugLabel}: ClamAV socket has been closed! Because of Error:`,
-                                            hadError
-                                        );
-                                    this._clamavSocket.end();
-                                })
-                                // When the ClamAV socket connection ends (receives chunk)
-                                .on('end', () => {
-                                    this._clamavSocket.end();
-                                    if (me.settings.debugMode)
-                                        console.log(`${me.debugLabel}: ClamAV socket has received the last chunk!`);
-                                    // Process the collected chunks
-                                    const response = Buffer.concat(this._clamavResponseChunks);
-                                    const result = me._processResult(response.toString('utf8'), null);
-                                    this._clamavResponseChunks = [];
-                                    if (me.settings.debugMode) {
-                                        console.log(`${me.debugLabel}: Result of scan:`, result);
-                                        console.log(
-                                            `${me.debugLabel}: It took ${_avScanTime} seconds to scan the file(s).`
-                                        );
-                                        clearScanBenchmark();
-                                    }
-
-                                    // If the scan timed-out
-                                    if (result.timeout === true) this.emit('timeout');
-
-                                    // NOTE: "scan-complete" could be called by the `handleError` method.
-                                    // We don't want to to double-emit this message.
-                                    if (_scanComplete === false) {
-                                        _scanComplete = true;
-                                        this._clamavSocket.end();
-                                        this.emit('scan-complete', result);
-                                    }
-                                })
-                                // If connection timesout.
-                                .on('timeout', () => {
-                                    this.emit('timeout', new Error('Connection to host/socket has timed out'));
-                                    this._clamavSocket.end();
-                                    if (me.settings.debugMode)
-                                        console.log(`${me.debugLabel}: Connection to host/socket has timed out`);
-                                })
-                                // When the ClamAV socket is ready to receive packets (this will probably never fire here)
-                                .on('ready', () => {
-                                    if (me.settings.debugMode)
-                                        console.log(`${me.debugLabel}: ClamAV socket ready to receive`);
-                                })
-                                // When we are officially connected to the ClamAV socket (probably will never fire here)
-                                .on('connect', () => {
-                                    if (me.settings.debugMode)
-                                        console.log(`${me.debugLabel}: Connected to ClamAV socket`);
-                                })
-                                // If an error is emitted from the ClamAV socket
-                                .on('error', (err) => {
-                                    console.error(`${me.debugLabel}: Error emitted from ClamAV socket: `, err);
-                                    handleError(err);
-                                })
-                                // If ClamAV is sending stuff to us (ie, an "OK", "Virus FOUND", or "ERROR")
-                                .on('data', (cvChunk) => {
-                                    // Push this chunk to our results collection array
-                                    this._clamavResponseChunks.push(cvChunk);
-                                    if (me.settings.debugMode)
-                                        console.log(`${me.debugLabel}: Got result!`, cvChunk.toString());
-
-                                    // Parse what we've gotten back from ClamAV so far...
-                                    const response = Buffer.concat(this._clamavResponseChunks);
-                                    const result = me._processResult(response.toString(), null);
-
-                                    // If there's an error supplied or if we detect a virus or timeout, stop stream immediately.
-                                    if (
-                                        result instanceof NodeClamError ||
-                                        (typeof result === 'object' &&
-                                            (('isInfected' in result && result.isInfected === true) ||
-                                                ('timeout' in result && result.timeout === true)))
-                                    ) {
-                                        // If a virus is detected...
-                                        if (
-                                            typeof result === 'object' &&
-                                            'isInfected' in result &&
-                                            result.isInfected === true
-                                        ) {
-                                            handleError(null, true, result);
-                                        }
-
-                                        // If a timeout is detected...
-                                        else if (
-                                            typeof result === 'object' &&
-                                            'isInfected' in result &&
-                                            result.isInfected === false
-                                        ) {
-                                            this.emit('timeout');
-                                            handleError(null, false, result);
-                                        }
-
-                                        // If any other kind of error is detected...
-                                        else {
-                                            handleError(result);
-                                        }
-                                    }
-                                    // For debugging purposes, spit out what was processed (if anything).
-                                    else if (me.settings.debugMode)
-                                        console.log(
-                                            `${me.debugLabel}: Processed Result: `,
-                                            result,
-                                            response.toString()
-                                        );
-                                });
-
-                            if (me.settings.debugMode) console.log(`${me.debugLabel}: Doing initial transform!`);
-                            // Handle the chunk
-                            doTransform();
-                        },
-                        (err) => {
-                            // Close socket if it's currently valid
-                            if (
-                                this._clamavSocket &&
-                                'readyState' in this._clamavSocket &&
-                                this._clamavSocket.readyState
-                            ) {
-                                this._clamavSocket.end();
-                            }
-
-                            // If there's an issue connecting to the ClamAV socket, this is where that's handled
-                            if (me.settings.debugMode)
-                                console.error(`${me.debugLabel}: Error initiating socket to ClamAV: `, err);
-                            handleError(err);
-                        }
-                    );
-                } else {
-                    // if (me.settings.debugMode) console.log(`${me.debugLabel}: Doing transform: ${++counter}`);
-                    // Handle the chunk
-                    doTransform();
-                }
-            },
-
-            // This is what is called when the input stream has dried up
-            flush(cb) {
-                if (me.settings.debugMode) console.log(`${me.debugLabel}: Done with the full pipeline.`);
-
-                // Keep track of how long it's taking to scan a file..
-                _avWaiting = null;
-                _avScanTime = 0;
-                if (me.settings.debugMode) {
-                    _avWaiting = setInterval(() => {
-                        _avScanTime += 1;
-                        if (_avScanTime % 5 === 0)
-                            console.log(`${me.debugLabel}: ClamAV has been scanning for ${_avScanTime} seconds...`);
-                    }, 1000);
-                }
-
-                // @todo: Investigate why this needs to be done in order
-                // for the ClamAV socket to be closed (why NodeClamTransform's
-                // `_flush` method isn't getting called)
-                // If the incoming stream is empty, transform() won't have been called, so we won't
-                // have a socket here.
-                if (this._clamavSocket && this._clamavSocket.writable === true) {
-                    const size = Buffer.alloc(4);
-                    size.writeInt32BE(0, 0);
-                    this._clamavSocket.write(size, cb);
-                }
-            },
         });
     }
 
@@ -1481,15 +1122,57 @@ class NodeClam {
     }
 
     /**
-     * Just an alias to `isInfected`. See docs for that for usage examples.
+     * Reparte un array de archivos en "bins" equilibrados por tamaño total.
      *
-     * @public
-     * @param {string} file - Path to the file to check
-     * @param {Function} [cb] - What to do after the scan
-     * @returns {Promise<object>} Object like: `{ file: String, isInfected: Boolean, viruses: Array }`
+     * @param {string[]} filePaths - Paths de los archivos a escanear
+     * @param {number} numBins - Número de bins (ej. 10)
+     * @returns {Promise<{ path: string, size: number }[][]>}
+     *          Array de bins, cada bin es un array de { path, size }
      */
-    scanFile(file, cb) {
-        return this.isInfected(file, cb);
+    async binPackFiles(filePaths, numBins = 10) {
+        // 1. Obtener tamaños
+        const filesWithSize = [];
+        for (const path of filePaths) {
+            try {
+                const { size } = await stat(path);
+                filesWithSize.push({ path, size });
+            } catch (err) {
+                // Si da error stat, lo tratamos como size=0 o lo excluimos
+                filesWithSize.push({ path, size: 0 });
+            }
+        }
+
+        // 2. Ordenar de mayor a menor
+        filesWithSize.sort((a, b) => b.size - a.size);
+
+        // 3. Inicializar bins
+        const bins = [];
+        for (let i = 0; i < numBins; i++) {
+            bins.push({
+                totalSize: 0,
+                files: [],
+            });
+        }
+
+        // 4. Para cada archivo, buscar el bin con menor totalSize (best fit)
+        for (const fileObj of filesWithSize) {
+            let bestBinIndex = 0;
+            let minSize = Infinity;
+
+            for (let i = 0; i < numBins; i++) {
+                if (bins[i].totalSize < minSize) {
+                    minSize = bins[i].totalSize;
+                    bestBinIndex = i;
+                }
+            }
+
+            bins[bestBinIndex].files.push(fileObj);
+            bins[bestBinIndex].totalSize += fileObj.size;
+        }
+
+        // Retornamos SOLO la parte .files de cada bin
+        // => array de arrays, cada uno con { path, size }
+        return bins.map((bin) => bin.files);
     }
 
     /**
@@ -1567,100 +1250,10 @@ class NodeClam {
         // At this point for a hybrid Promise/CB API to work, everything needs to be wrapped
         // in a Promise that will be returned
         return new Promise(async (resolve, reject) => {
-            let errors = {};
+            const errors = {};
             let goodFiles = [];
             let badFiles = [];
-            let viruses = [];
             let origNumFiles = 0;
-
-            // The function that parses the stdout from clamscan/clamdscan
-            const parseStdout = (err, stdout) => {
-                // Get Virus List
-                viruses = stdout
-                    .trim()
-                    .split(String.fromCharCode(10))
-                    .map((v) => (/FOUND\n?$/.test(v) ? v.replace(/(.+):\s+(.+)FOUND\n?$/, '$2').trim() : null))
-                    .filter(Boolean);
-
-                stdout
-                    .trim()
-                    .split(String.fromCharCode(10))
-                    .filter(Boolean)
-                    .forEach((result) => {
-                        if (/^[-]+$/.test(result)) return;
-
-                        let path = '<Unknown File Path!>';
-                        const pathMatch = result.match(/^(.*): /);
-                        if (pathMatch && pathMatch.length > 0) {
-                            // eslint-disable-next-line prefer-destructuring
-                            path = pathMatch[1];
-                        }
-
-                        // eslint-disable-next-line no-control-regex
-                        if (/\s+OK(\u0000|[\r\n])?$/.test(result)) {
-                            if (self.settings.debugMode) console.log(`${this.debugLabel}: ${path} is OK!`);
-                            goodFiles.push(path);
-                        } else {
-                            if (self.settings.debugMode) console.log(`${this.debugLabel}: ${path} is INFECTED!`);
-                            badFiles.push(path);
-                        }
-                    });
-
-                badFiles = Array.from(new Set(badFiles));
-                goodFiles = Array.from(new Set(goodFiles));
-                viruses = Array.from(new Set(viruses));
-
-                if (err) return hasCb ? endCb(err, [], badFiles, {}, []) : reject(new NodeClamError({ badFiles }, err));
-                return hasCb
-                    ? endCb(null, goodFiles, badFiles, errors, viruses)
-                    : resolve({ goodFiles, badFiles, viruses, errors });
-            };
-
-            // Use this method when scanning using local binaries
-            const localScan = async (allFiles) => {
-                // Build the actual command purely for debugging purposes
-                const command = `${self.settings[self.scanner].path} ${self._buildClamArgs(allFiles).join(' ')}`;
-                if (self.settings.debugMode)
-                    if (self.settings.debugMode) console.log(`${self.debugLabel}: Configured clam command: ${command}`);
-
-                // Execute the clam binary with the proper flags
-                execFile(self.settings[self.scanner].path, self._buildClamArgs(allFiles), (err, stdout, stderr) => {
-                    if (self.settings.debugMode) console.log(`${this.debugLabel}: stdout:`, stdout);
-
-                    // Exit code 1 just means "virus found". This is not an "error".
-                    if (err && err.code !== 1) {
-                        // If error code is 2 and the we find a non-file-permissions issue...
-                        if (err.code === 2) {
-                            // If not all error messages are file permissions issues, then throw an error.
-                            const numFilePermissionsIssues = stderr
-                                .split(os.EOL)
-                                .filter((v) => /^ERROR: Can't access file/.test(v));
-                            if (numFilePermissionsIssues.length < allFiles.length) return parseStdout(err, stdout);
-                        }
-                    }
-
-                    // Let user know if there are file permissions issues...
-                    if (stderr) {
-                        if (self.settings.debugMode) console.log(`${this.debugLabel}: `, stderr);
-
-                        if (stderr.length > 0) {
-                            const invalidFiles = stderr
-                                .split(os.EOL)
-                                .map((errLine) => {
-                                    const match = errLine.match(/^ERROR: Can't access file (.*)$/);
-                                    if (match !== null && match.length > 1 && typeof match[1] === 'string')
-                                        return { [match[1]]: "Can't access file." };
-                                    return null;
-                                })
-                                .filter(Boolean);
-
-                            errors = invalidFiles.reduce((l, r) => ({ ...l, ...r }), {});
-                        }
-                    }
-
-                    return parseStdout(null, stdout);
-                });
-            };
 
             // This is the function that actually scans the files
             // eslint-disable-next-line consistent-return
@@ -1675,37 +1268,46 @@ class NodeClam {
                     // Scan files in parallel chunks of 10
                     const chunkSize = 10;
                     let results = [];
+                    let scannedCount = 0;
+
                     while (theFiles.length > 0) {
-                        let chunk = [];
-                        if (theFiles.length > chunkSize) {
-                            chunk = theFiles.splice(0, chunkSize);
-                        } else {
-                            chunk = theFiles.splice(0);
-                        }
+                        const chunk = theFiles.length > chunkSize ? theFiles.splice(0, chunkSize) : theFiles.splice(0);
 
-                        // Scan 10 files then move to the next set...
-                        // eslint-disable-next-line no-await-in-loop
-                        const chunkResults = await Promise.all(
-                            chunk.map(async (file) => {
-                                try {
-                                    const result = await this.isInfected(file);
-                                    return result;
-                                } catch (err) {
-                                    return { err, file, isInfected: null, viruses: [] };
+                        const chunkPromises = chunk.map(async (file) => {
+                            try {
+                                const result = await this.isInfected(file);
+                                console.log('RESULT: ', result);
+
+                                scannedCount++;
+                                const progressRatio = ((scannedCount / numFiles) * 100).toFixed(2);
+
+                                fileCb(null, file, result.isInfected, result.viruses, scannedCount, progressRatio);
+
+                                return { ...result, file };
+                            } catch (err) {
+                                const error = err.data.err ?? err;
+                                console.log('ERROR IN SCAN FILES: ', { err, error });
+                                if (isPermissionError(error)) {
+                                    console.warn(`File ${file} skipped due to EBUSY or permission issue.`);
+                                    scannedCount++;
+                                    const progressRatio = ((scannedCount / numFiles) * 100).toFixed(2);
+
+                                    fileCb(null, file, false, [], scannedCount, progressRatio);
+
+                                    return { file, isInfected: false, viruses: [] };
                                 }
-                            })
-                        );
 
-                        // Re-map results back to their filenames
-                        const chunkResultsMapped = chunkResults.map((result, i) => ({ ...result, file: chunk[i] }));
-                        // Add mapped chunk results to overall scan results array
-                        results = results.concat(chunkResultsMapped);
-
-                        // Trigger file-callback for each file that was just scanned
-                        chunkResultsMapped.forEach(({ err, file, isInfected, viruses: virus }) => {
-                            const progressRatio = ((results.length / numFiles) * 100).toFixed(2);
-                            fileCb(err, file, isInfected, virus, results.length, progressRatio);
+                                console.error(`Error scanning file ${file}:`, err);
+                                throw err;
+                            }
                         });
+
+                        // Esperar a que termine el chunk entero
+                        // (pero el callback se ha llamado ya en cada promesa)
+                        // eslint-disable-next-line no-await-in-loop
+                        const chunkResults = await Promise.all(chunkPromises);
+
+                        results = results.concat(chunkResults);
                     }
 
                     // Build out the good and bad files arrays
@@ -1740,135 +1342,6 @@ class NodeClam {
                         ? endCb(null, goodFiles, badFiles, {}, [])
                         : resolve({ goodFiles, badFiles, errors: null, viruses: [] });
                 }
-
-                // The quicker but less-talkative way
-                let allFiles = [];
-
-                // This is where we scan every file/path in the `allFiles` array once it's been fully populated
-                const finishScan = async () => {
-                    // Make sure there are no dupes, falsy values, or non-strings... just because we can
-                    allFiles = Array.from(new Set(allFiles.filter((v) => !!v))).filter((v) => typeof v === 'string');
-
-                    // console.log('All Files: ', allFiles);
-
-                    // If file list is empty, return error
-                    if (allFiles.length <= 0) {
-                        const err = new NodeClamError('No valid files provided to scan!');
-                        return hasCb ? endCb(err, [], [], {}, []) : reject(err);
-                    }
-
-                    // If scanning via sockets, use that method, otherwise use `localScan`
-                    if (self.settings.clamdscan.socket || self.settings.clamdscan.port) {
-                        const chunkSize = 10;
-                        let results = [];
-                        while (allFiles.length > 0) {
-                            let chunk = [];
-                            if (allFiles.length > chunkSize) {
-                                chunk = allFiles.splice(0, chunkSize);
-                            } else {
-                                chunk = allFiles.splice(0);
-                            }
-
-                            // Scan 10 files then move to the next set...
-                            // eslint-disable-next-line no-await-in-loop
-                            const chunkResults = await Promise.all(
-                                chunk.map((file) => self.isInfected(file).catch((e) => e))
-                            );
-
-                            // Re-map results back to their filenames
-                            const chunkResultsMapped = chunkResults.map((v, i) => [chunk[i], v]);
-                            // const chunkResultsMapped = chunkResults;
-
-                            // Add mapped chunk results to overall scan results array
-                            results = results.concat(chunkResultsMapped);
-                        }
-
-                        // Build out the good and bad files arrays
-                        results.forEach((v) => {
-                            // eslint-disable-next-line prefer-destructuring
-                            if (v[1] instanceof Error) errors[v[0]] = v[1];
-                            else if (typeof v[1] === 'object' && 'isInfected' in v[1] && v[1].isInfected === true) {
-                                badFiles.push(v[1].file);
-                                if ('viruses' in v[1] && Array.isArray(v[1].viruses) && v[1].viruses.length > 0) {
-                                    viruses = viruses.concat(v[1].viruses);
-                                }
-                            } else if (typeof v[1] === 'object' && 'isInfected' in v[1] && v[1].isInfected === false) {
-                                goodFiles.push(v[1].file);
-                            }
-                        });
-
-                        // Make sure the list of bad and good files is unique...(just for good measure)
-                        badFiles = Array.from(new Set(badFiles));
-                        goodFiles = Array.from(new Set(goodFiles));
-                        viruses = Array.from(new Set(viruses));
-
-                        if (self.settings.debugMode) {
-                            console.log(`${self.debugLabel}: Scan Complete!`);
-                            console.log(`${self.debugLabel}: Num Bad Files: `, badFiles.length);
-                            console.log(`${self.debugLabel}: Num Good Files: `, goodFiles.length);
-                            console.log(`${self.debugLabel}: Num Viruses: `, viruses.length);
-                        }
-
-                        return hasCb
-                            ? endCb(null, goodFiles, badFiles, errors, viruses)
-                            : resolve({ errors, goodFiles, badFiles, viruses });
-                    }
-                    return localScan(allFiles);
-                };
-
-                // If clamdscan is the preferred binary but if we don't want to scan recursively
-                // then we need to convert all path entries to a list of files found in the
-                // first layer of that path
-                if (this.scanRecursively === false && this.scanner === 'clamdscan') {
-                    const chunkSize = 10;
-                    while (theFiles.length > 0) {
-                        let chunk = [];
-                        if (theFiles.length > chunkSize) {
-                            chunk = theFiles.splice(0, chunkSize);
-                        } else {
-                            chunk = theFiles.splice(0);
-                        }
-
-                        // Scan 10 files then move to the next set...
-                        // eslint-disable-next-line no-await-in-loop
-                        const chunkResults = await Promise.all(chunk.map((file) => fsStat(file).catch((e) => e)));
-
-                        // Add each file to `allFiles` array
-                        // chunkResults.forEach(async (v,i) => {
-                        // eslint-disable-next-line no-restricted-syntax,guard-for-in
-                        for (const i in chunkResults) {
-                            const v = chunkResults[i];
-                            // If the result is an error, add it to the error
-                            // object and skip adding this file to the `allFiles` array
-                            if (v instanceof Error) {
-                                errors[chunk[i]] = v;
-                            } else if (v.isFile()) {
-                                allFiles.push(chunk[i]);
-                            } else if (v.isDirectory()) {
-                                const rgx = new RegExp(`^(?!${v})(.+)$`);
-                                try {
-                                    // eslint-disable-next-line no-await-in-loop
-                                    const contents = (await fsReaddir(chunk[i], { withFileTypes: true }))
-                                        .filter((x) => x.isFile())
-                                        .map((x) => x.name.replace(rgx, `${v}/${x.name}`));
-
-                                    allFiles = allFiles.concat(contents);
-                                } catch (e) {
-                                    errors[chunk[i]] = e;
-                                }
-                            }
-                        }
-                    }
-
-                    // Scan the files in the allFiles array
-                    return finishScan();
-                }
-
-                // If not scanning recursively, just scan all the files
-                allFiles = theFiles;
-
-                // Scan the files in the allFiles array
-                return finishScan();
             };
 
             // If string is provided in files param, forgive them... create a single element array
@@ -1904,11 +1377,20 @@ class NodeClam {
             if (!Array.isArray(files) || files.length === 0) {
                 // Before failing completely, check if there is a file list specified
                 if (!('fileList' in this.settings) || !this.settings.fileList) {
-                    const err = new NodeClamError(
-                        { files, settings: this.settings },
-                        'No files provided to scan and no file list provided!'
-                    );
-                    return hasCb ? endCb(err, [], [], {}, []) : reject(err);
+                    const emptyResult = {
+                        goodFiles: [],
+                        badFiles: [],
+                        errors: {},
+                        viruses: [],
+                    };
+                    return hasCb
+                        ? endCb(null, emptyResult.goodFiles, emptyResult.badFiles, emptyResult.viruses)
+                        : resolve(emptyResult);
+                    // const err = new NodeClamError(
+                    //     { files, settings: this.settings },
+                    //     'No files provided to scan and no file list provided!'
+                    // );
+                    // return hasCb ? endCb(err, [], [], {}, []) : reject(err);
                 }
 
                 // If the file list is specified, read it in and scan listed files...
@@ -1916,19 +1398,17 @@ class NodeClam {
                     const data = (await fsReadfile(this.settings.fileList)).toString().split(os.EOL);
                     return doScan(data);
                 } catch (e) {
-                    console.log('ERROR IN DO SCAN WHILE SCANNING FILES: ', e);
                     const err = new NodeClamError(
                         { err: e, fileList: this.settings.fileList },
                         `No files provided and file list was provided but could not be found! ${e}`
                     );
                     return hasCb ? endCb(err, [], [], {}, []) : reject(err);
                 }
-            } else {
-                try {
-                    return doScan(files);
-                } catch (error) {
-                    console.log('ERROR SCANNING FILES: ', error);
-                }
+            }
+            try {
+                return await doScan(files);
+            } catch (error) {
+                reject(error);
             }
         });
     }
@@ -1968,7 +1448,7 @@ class NodeClam {
      * const {path, isInfected, goodFiles, badFiles, viruses} = await clamscan.scanDir('/some/path/to/scan');
      */
     scanDir(path = '', endCb = null, fileCb = null) {
-        const self = this;
+        // const self = this;
         let hasCb = false;
 
         // Verify second param, if supplied, is a function
@@ -2001,40 +1481,6 @@ class NodeClam {
                 return hasCb ? endCb(err, [], []) : reject(err);
             }
 
-            // Execute the clam binary with the proper flags
-            const localScan = () => {
-                execFile(self.settings[self.scanner].path, self._buildClamArgs(path), (err, stdout, stderr) => {
-                    const { isInfected, viruses } = self._processResult(stdout, path);
-
-                    if (err) {
-                        // Error code 1 means viruses were found...
-                        if (Object.prototype.hasOwnProperty.call(err, 'code') && err.code === 1) {
-                            return hasCb
-                                ? endCb(null, [], [path], viruses)
-                                : resolve({ path, isInfected, badFiles: [path], goodFiles: [], viruses });
-                        }
-                        const error = new NodeClamError(
-                            { path, err },
-                            'There was an error scanning the path or processing the result.'
-                        );
-                        return hasCb ? endCb(error, [], [], []) : reject(error);
-                    }
-
-                    if (stderr) {
-                        console.error(`${self.debugLabel} error: `, stderr);
-                        return hasCb
-                            ? endCb(null, [], [], [])
-                            : resolve({ stderr, path, isInfected, goodFiles: [], badFiles: [], viruses });
-                    }
-
-                    const goodFiles = isInfected ? [] : [path];
-                    const badFiles = isInfected ? [path] : [];
-                    return hasCb
-                        ? endCb(null, goodFiles, badFiles, viruses)
-                        : resolve({ path, isInfected, goodFiles, badFiles, viruses });
-                });
-            };
-
             // Get all files recursively using `scanFiles`
             if (this.settings.scanRecursively === true && (typeof fileCb === 'function' || !hasCb)) {
                 try {
@@ -2046,166 +1492,6 @@ class NodeClam {
                 } catch (e) {
                     const err = new NodeClamError({ path, err: e }, 'There was an issue scanning the path specified!');
                     return hasCb ? endCb(err, [], []) : reject(err);
-                }
-            }
-
-            // Clamdscan always does recursive, so, here's a way to avoid that if you want (will call `scanFiles` method)
-            else if (this.settings.scanRecursively === false && this.scanner === 'clamdscan') {
-                try {
-                    const allFiles = await getFiles(path);
-                    const { goodFiles, badFiles, viruses, errors } = await this.scanFiles(allFiles, null, null);
-                    return hasCb
-                        ? endCb(null, goodFiles, badFiles, viruses)
-                        : resolve({ goodFiles, badFiles, viruses, errors });
-                } catch (e) {
-                    const err = new NodeClamError(
-                        { path, err: e },
-                        'Could not read the file listing of the path provided.'
-                    );
-                    return hasCb ? endCb(err, [], []) : reject(err);
-                }
-            }
-
-            // If you don't care about individual file progress (which is very slow for clamscan but fine for clamdscan...)
-            // NOTE: This section WILL scan recursively
-            else if (typeof fileCb !== 'function' || !hasCb) {
-                // Scan locally via socket (either TCP or Unix socket)
-                // This is much simpler/faster process--potentially even more with MULTISCAN enabled)
-                if (
-                    this.settings.clamdscan.socket ||
-                    (this.settings.clamdscan.port && (!this.settings.clamdscan.host || this._isLocalHost()))
-                ) {
-                    let client;
-
-                    try {
-                        client = await this._initSocket('scanDir');
-                        if (this.settings.debugMode)
-                            console.log(`${this.debugLabel}: scanning path with local domain socket now.`);
-
-                        if (this.settings.clamdscan.multiscan === true) {
-                            // Use Multiple threads (faster)
-                            client.write(`MULTISCAN ${path}`);
-                        } else {
-                            // Use single or default # of threads (potentially slower)
-                            client.write(`CONTSCAN ${path}`);
-                        }
-
-                        // Where to buffer string response (not a real "Buffer", per se...)
-                        const chunks = [];
-
-                        // Read output of the ClamAV socket to see what it's saying and when
-                        // it's done saying it (FIN)
-                        client
-                            // ClamAV is sending stuff to us
-                            .on('data', (chunk) => {
-                                chunks.push(chunk);
-                            })
-                            // ClamAV is done sending stuff to us
-                            .on('end', async () => {
-                                if (this.settings.debugMode)
-                                    console.log(`${this.debugLabel}: Received response from remote clamd service.`);
-
-                                const response = Buffer.concat(chunks);
-                                const result = this._processResult(response.toString(), path);
-                                if (result instanceof Error) {
-                                    // Fallback to local if that's an option
-                                    if (this.settings.clamdscan.localFallback === true) return localScan();
-                                    const err = new NodeClamError(
-                                        { path, err: result },
-                                        `There was an issue scanning the path provided: ${result}`
-                                    );
-                                    return hasCb ? endCb(err, [], []) : reject(err);
-                                }
-
-                                // Fully close the client
-                                client.end();
-
-                                if (this.settings.debugMode) console.log(`${this.debugLabel}: Results: `, result);
-                                const { isInfected, viruses } = result;
-
-                                // If the path is infected, build out list of infected files
-                                let badFiles = [];
-                                if (isInfected) {
-                                    badFiles = Array.from(
-                                        new Set(
-                                            result.resultString.split(os.EOL).map((v) => {
-                                                const [file, virus] = v.replace(/ FOUND$/, '').split(': ');
-                                                return { file, virus };
-                                            })
-                                        )
-                                    );
-                                }
-
-                                // Having a list of good files could use up all available memory if a big enough
-                                // directory is scanned. Just return the scanned path if all files are good.
-                                const goodFiles = isInfected ? [] : [path];
-
-                                // Get a count of all the good files since that should be easy enough...
-                                const numGoodFiles = (await getFiles(path)).length - badFiles.length;
-
-                                if (this.settings.debugMode) console.log(`${this.debugLabel}: Bad Files: `, badFiles);
-                                if (this.settings.debugMode)
-                                    console.log(`${this.debugLabel}: # Good Files: `, numGoodFiles);
-
-                                return hasCb
-                                    ? endCb(null, goodFiles, badFiles, viruses, numGoodFiles)
-                                    : resolve({ path, isInfected, goodFiles, badFiles, viruses, numGoodFiles });
-                            });
-                    } catch (e) {
-                        console.log('ERROR IN SCAN DIR: ', e);
-                        const err = new NodeClamError(
-                            { path, err: e },
-                            `There was an issue scanning the path provided: ${e}`
-                        );
-                        return hasCb ? endCb(err, [], []) : reject(err);
-                    }
-                }
-
-                // Scan path using remote host/port and TCP protocol (must stream every single file to it...)
-                // WARNING: This is going to be really slow
-                else if (this.settings.clamdscan.port && !this._isLocalHost()) {
-                    const results = [];
-
-                    try {
-                        // Get all files in the directory (potentially recursively)
-                        const files = await getFiles(path, this.settings.scanRecursively);
-
-                        // Send files to remote server in parallel chunks of 10
-                        const chunkSize = 10;
-                        while (files.length > 0) {
-                            let chunk = [];
-                            if (files.length > chunkSize) {
-                                chunk = files.splice(0, chunkSize);
-                            } else {
-                                chunk = files.splice(0);
-                            }
-
-                            // Scan 10 files then move to the next set...
-                            results.concat(
-                                // eslint-disable-next-line no-await-in-loop
-                                await Promise.all(chunk.map((file) => this.scanStream(fs.createReadStream(file))))
-                            );
-                        }
-
-                        // If even a single file is infected, the whole directory is infected
-                        const isInfected = results.any((v) => v === false);
-                        const goodFiles = isInfected ? [] : [path];
-                        const badFiles = isInfected ? [path] : [];
-                        return hasCb
-                            ? endCb(null, goodFiles, badFiles)
-                            : resolve({ path, isInfected, goodFiles, badFiles, viruses: [] });
-                    } catch (e) {
-                        const err = new NodeClamError(
-                            { path, err: e },
-                            'Invalid path provided! Path must be a string!'
-                        );
-                        return hasCb ? endCb(err, [], []) : reject(err);
-                    }
-                }
-
-                // Scan locally
-                else {
-                    localScan();
                 }
             }
         });
@@ -2373,6 +1659,7 @@ class NodeClam {
                             const err = new NodeClamError(
                                 `Scan aborted. Reply from server: ${response.toString('utf8')} `
                             );
+
                             return hasCb ? cb(err, null) : reject(err);
                         }
 
