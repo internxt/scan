@@ -1,4 +1,5 @@
 /* eslint-disable prettier/prettier */
+/* eslint-disable no-useless-catch */
 /* eslint-disable prefer-destructuring */
 /* eslint-disable no-plusplus */
 /* eslint-disable no-await-in-loop */
@@ -541,10 +542,7 @@ class NodeClam {
             const timeout = this.settings.clamdscan.timeout ? this.settings.clamdscan.timeout : 20000;
 
             // The fastest option is a local Unix socket
-            if (this.settings.clamdscan.socket)
-                client = net.createConnection({ path: this.settings.clamdscan.socket, timeout });
-            // If a port is specified, we're going to be connecting via TCP
-            else if (this.settings.clamdscan.port) {
+            if (this.settings.clamdscan.port) {
                 // If a host is specified (usually for a remote host)
                 if (this.settings.clamdscan.host) {
                     if (this.settings.clamdscan.tls) {
@@ -602,7 +600,7 @@ class NodeClam {
                         console.log(`${this.debugLabel}: something is not working...`);
                     }
 
-                    return resolve(client);
+                    resolve(client);
                 })
                 .on('timeout', () => {
                     if (this.settings.debugMode) console.log(`${this.debugLabel}: Socket/Host connection timed out.`);
@@ -613,6 +611,7 @@ class NodeClam {
                     if (this.settings.debugMode) console.log(`${this.debugLabel}: Socket/Host connection closed.`);
                 })
                 .on('error', (e) => {
+                    console.log('ERROR IN INIT SOCKET: ', e);
                     if (this.settings.debugMode) console.error(`${this.debugLabel}: Socket/Host connection failed:`, e);
                     reject(e);
                 });
@@ -726,6 +725,8 @@ class NodeClam {
         if (typeof result !== 'string') {
             if (this.settings.debugMode)
                 console.log(`${this.debugLabel}: Invalid stdout from scanner (not a string): `, result);
+
+            console.log('RESULT IS NOT A STRING: ', result);
             throw new Error('Invalid result to process (not a string)');
         }
 
@@ -768,6 +769,7 @@ class NodeClam {
                 if (this.settings.debugMode) console.log(`${this.debugLabel}: Error Response: `, error);
                 if (this.settings.debugMode) console.log(`${this.debugLabel}: File may be INFECTED!`);
             }
+            console.log('ERROR IN PROCESS RESULT: ', error);
             return new NodeClamError({ error }, `An error occurred while scanning the piped-through stream: ${error}`);
         }
 
@@ -809,7 +811,6 @@ class NodeClam {
      * console.log(`ClamAV Version: ${version}`);
      */
     getVersion(cb) {
-        const self = this;
         let hasCb = false;
 
         // Verify second param, if supplied, is a function
@@ -822,37 +823,6 @@ class NodeClam {
         // eslint-disable-next-line consistent-return
         return new Promise(async (resolve, reject) => {
             // Function for falling back to running a scan locally via a child process
-            const localFallback = async () => {
-                const args = self._buildClamArgs('--version');
-
-                if (self.settings.debugMode)
-                    console.log(
-                        `${this.debugLabel}: Configured clam command: ${self.settings[self.scanner].path}`,
-                        args.join(' ')
-                    );
-
-                // Execute the clam binary with the proper flags
-                try {
-                    const { stdout, stderr } = await cpExecFile(`${self.settings[self.scanner].path}`, args);
-
-                    if (stderr) {
-                        const err = new NodeClamError(
-                            { stderr, file: null },
-                            'ClamAV responded with an unexpected response when requesting version.'
-                        );
-                        if (self.settings.debugMode) console.log(`${this.debugLabel}: `, err);
-                        return hasCb ? cb(err, null, null) : reject(err);
-                    }
-                    return hasCb ? cb(null, stdout) : resolve(stdout);
-                } catch (e) {
-                    if (Object.prototype.hasOwnProperty.call(e, 'code') && e.code === 1) {
-                        return hasCb ? cb(null, null) : resolve(null, null);
-                    }
-                    const err = new NodeClamError({ err: e }, 'There was an error requestion ClamAV version.');
-                    if (self.settings.debugMode) console.log(`${this.debugLabel}: `, err);
-                    return hasCb ? cb(err, null) : reject(err);
-                }
-            };
 
             // If user wants to connect via socket or TCP...
             if (
@@ -875,13 +845,8 @@ class NodeClam {
                 } catch (err) {
                     if (client && 'readyState' in client && client.readyState) client.end();
 
-                    if (this.settings.clamdscan.localFallback === true) {
-                        return localFallback();
-                    }
                     return hasCb ? cb(err, null) : reject(err);
                 }
-            } else {
-                return localFallback();
             }
         });
     }
@@ -916,142 +881,85 @@ class NodeClam {
      * // Async/Await Example
      * const {file, isInfected, viruses} = await clamscan.isInfected('/a/picture/for_example.jpg');
      */
-    isInfected(file = '', cb = null) {
-        // const self = this;
-        let hasCb = false;
-
-        // Verify second param, if supplied, is a function
-        if (cb && typeof cb !== 'function') {
-            throw new NodeClamError(
-                'Invalid cb provided to isInfected. Second paramter, if provided, must be a function!'
-            );
-        } else if (cb && typeof cb === 'function') {
-            hasCb = true;
-        }
-
+    async isInfected(file = '') {
         // At this point for the hybrid Promise/CB API to work, everything needs to be wrapped
         // in a Promise that will be returned
         // eslint-disable-next-line consistent-return
-        return new Promise(async (resolve, reject) => {
-            // Verify string is passed to the file parameter
-            if (typeof file !== 'string' || (typeof file === 'string' && file.trim() === '')) {
-                const err = new NodeClamError({ file }, 'Invalid or empty file name provided.');
-                return hasCb ? cb(err, file, null, []) : reject(err);
+
+        // Verify string is passed to the file parameter
+        if (typeof file !== 'string' || (typeof file === 'string' && file.trim() === '')) {
+            const err = new NodeClamError({ file }, 'Invalid or empty file name provided.');
+            throw err;
+        }
+        // Clean file name
+        file = file.trim();
+
+        // See if we can find/read the file
+        // -----
+        // NOTE: Is it even valid to do this since, in theory, the
+        // file's existance or permission could change between this check
+        // and the actual scan (even if it's highly unlikely)?
+        //-----
+
+        try {
+            const handle = await fsPromises.open(file, 'r');
+            await handle.close();
+        } catch (e) {
+            const err = new NodeClamError({ err: e, file }, 'Could not access file to scan!');
+            console.log('ACCESS ERROR:', e);
+            throw err;
+        }
+
+        try {
+            await fsAccess(file, fs.constants.R_OK);
+        } catch (e) {
+            const err = new NodeClamError({ err: e, file }, 'Could not find file to scan!');
+            throw err;
+        }
+        // Make sure the "file" being scanned is actually a file and not a directory (or something else)
+        try {
+            const stats = await fsStat(file);
+            const isDirectory = stats.isDirectory();
+            const isFile = stats.isFile();
+
+            // If it's not a file or a directory, fail now
+            if (!isFile && !isDirectory) {
+                throw Error(`${file} is not a valid file or directory.`);
             }
-            // Clean file name
-            file = file.trim();
 
-            // See if we can find/read the file
-            // -----
-            // NOTE: Is it even valid to do this since, in theory, the
-            // file's existance or permission could change between this check
-            // and the actual scan (even if it's highly unlikely)?
-            //-----
-            try {
-                await fsAccess(file, fs.constants.R_OK);
-            } catch (e) {
-                const err = new NodeClamError({ err: e, file }, 'Could not find file to scan!');
-
-                return hasCb ? cb(err, file, true) : reject(err);
+            // If it's a directory/path, scan it using the `scanDir` method instead
+            else if (!isFile && isDirectory) {
+                const { isInfected } = await this.scanDir(file);
+                return { file, isInfected, viruses: [] };
             }
-            // Make sure the "file" being scanned is actually a file and not a directory (or something else)
+        } catch (err) {
+            throw err;
+        }
+
+        // If user wants to scan via socket or TCP...
+        if (this.settings.clamdscan.port || this.settings.clamdscan.host) {
+            let stream;
             try {
-                const stats = await fsStat(file);
-                const isDirectory = stats.isDirectory();
-                const isFile = stats.isFile();
+                // Convert file to stream
+                stream = await fs.createReadStream(file);
 
-                // If it's not a file or a directory, fail now
-                if (!isFile && !isDirectory) {
-                    throw Error(`${file} is not a valid file or directory.`);
-                }
+                const isInfected = await this.scanStream(stream);
+                // Attempt to scan the stream.
 
-                // If it's a directory/path, scan it using the `scanDir` method instead
-                else if (!isFile && isDirectory) {
-                    const { isInfected } = await this.scanDir(file);
-                    return hasCb ? cb(null, file, isInfected, []) : resolve({ file, isInfected, viruses: [] });
-                }
+                return { ...isInfected, file };
             } catch (err) {
-                return hasCb ? cb(err, file, null) : reject(err);
-            }
-
-            // If user wants to scan via socket or TCP...
-            if (this.settings.clamdscan.socket || this.settings.clamdscan.port || this.settings.clamdscan.host) {
-                // Scan using local unix domain socket (much simpler/faster process--especially with MULTISCAN enabled)
-                if (this.settings.clamdscan.socket) {
-                    let client;
-
-                    try {
-                        client = await this._initSocket('isInfected');
-                        if (this.settings.debugMode)
-                            console.log(`${this.debugLabel}: scanning with local domain socket now.`);
-
-                        if (this.settings.clamdscan.multiscan === true) {
-                            // Use Multiple threads (faster)
-                            client.write(`MULTISCAN ${file}`);
-                        } else {
-                            // Use single or default # of threads (potentially slower)
-                            client.write(`SCAN ${file}`);
-                        }
-
-                        client.on('data', async (data) => {
-                            if (this.settings.debugMode)
-                                console.log(
-                                    `${this.debugLabel}: Received response from remote clamd service: `,
-                                    data.toString()
-                                );
-                            try {
-                                const result = this._processResult(data.toString(), file);
-                                if (result instanceof Error) {
-                                    client.end();
-                                    // Throw the error so that its caught and fallback is attempted
-                                    throw result;
-                                }
-
-                                client.end();
-                                const { isInfected, viruses } = result;
-                                return hasCb
-                                    ? cb(null, file, isInfected, viruses)
-                                    : resolve({ file, isInfected, viruses });
-                            } catch (err) {
-                                client.end();
-
-                                // Fallback to local if that's an option
-                                // if (this.settings.clamdscan.localFallback === true) return localScan();
-
-                                return hasCb ? cb(err, file, null, []) : reject(err);
-                            }
-                        });
-                    } catch (err) {
-                        if (client && 'readyState' in client && client.readyState) client.end();
-
-                        // Fallback to local if that's an option
-                        // if (this.settings.clamdscan.localFallback === true) return localScan();
-
-                        return hasCb ? cb(err, file, null, []) : reject(err);
-                    }
-                }
-
-                // Scan using remote host/port and TCP protocol (must stream the file)
-                else {
-                    // Convert file to stream
-                    const stream = fs.createReadStream(file);
-
-                    // Attempt to scan the stream.
-                    try {
-                        const isInfected = await this.scanStream(stream);
-                        return hasCb ? cb(null, file, isInfected, []) : resolve({ ...isInfected, file });
-                    } catch (e) {
-                        console.log('ERROR IN SCAN STREAM: ', e);
-                        // Otherwise, fail
-                        const err = new NodeClamError({ err: e, file }, 'Could not scan file via TCP or locally!');
-                        return hasCb ? cb(err, file, null, []) : reject(err);
-                    } finally {
-                        // Kill file stream on response
-                        stream.destroy();
-                    }
+                const error = new NodeClamError(
+                    { err, file },
+                    `ERROR WHILE SCANNING FILES VIA STREAM IN IS INFECTED FUNCTION: ${err}`
+                );
+                console.log('ERROR SCANNING STREAM: ', error);
+                throw error;
+            } finally {
+                if (stream && !stream.destroyed) {
+                    stream.destroy();
                 }
             }
-        });
+        }
     }
 
     /**
@@ -1121,16 +1029,7 @@ class NodeClam {
         });
     }
 
-    /**
-     * Reparte un array de archivos en "bins" equilibrados por tamaño total.
-     *
-     * @param {string[]} filePaths - Paths de los archivos a escanear
-     * @param {number} numBins - Número de bins (ej. 10)
-     * @returns {Promise<{ path: string, size: number }[][]>}
-     *          Array de bins, cada bin es un array de { path, size }
-     */
     async binPackFiles(filePaths, numBins = 10) {
-        // 1. Obtener tamaños
         const filesWithSize = [];
         for (const path of filePaths) {
             try {
@@ -1142,10 +1041,8 @@ class NodeClam {
             }
         }
 
-        // 2. Ordenar de mayor a menor
         filesWithSize.sort((a, b) => b.size - a.size);
 
-        // 3. Inicializar bins
         const bins = [];
         for (let i = 0; i < numBins; i++) {
             bins.push({
@@ -1154,7 +1051,6 @@ class NodeClam {
             });
         }
 
-        // 4. Para cada archivo, buscar el bin con menor totalSize (best fit)
         for (const fileObj of filesWithSize) {
             let bestBinIndex = 0;
             let minSize = Infinity;
@@ -1170,8 +1066,6 @@ class NodeClam {
             bins[bestBinIndex].totalSize += fileObj.size;
         }
 
-        // Retornamos SOLO la parte .files de cada bin
-        // => array de arrays, cada uno con { path, size }
         return bins.map((bin) => bin.files);
     }
 
@@ -1189,37 +1083,6 @@ class NodeClam {
      * @param {Function} [endCb] - What to do after the scan completes
      * @param {Function} [fileCb] - What to do after each file has been scanned
      * @returns {Promise<object>} Object like: `{ goodFiles: Array, badFiles: Array, errors: Object, viruses: Array }`
-     * @example
-     * // Callback Example
-     * const scanStatus = {
-     *     good: 0,
-     *     bad: 0
-     * };
-     * const files = [
-     *     '/path/to/file/1.jpg',
-     *     '/path/to/file/2.mov',
-     *     '/path/to/file/3.rb'
-     * ];
-     * clamscan.scanFiles(files, (err, goodFiles, badFiles, viruses) => {
-     *     if (err) return console.error(err);
-     *     if (badFiles.length > 0) {
-     *         console.log({
-     *             msg: `${goodFiles.length} files were OK. ${badFiles.length} were infected!`,
-     *             badFiles,
-     *             goodFiles,
-     *             viruses,
-     *         });
-     *     } else {
-     *         res.send({msg: "Everything looks good! No problems here!."});
-     *     }
-     * }, (err, file, isInfected, viruses) => {
-     *     ;(isInfected ? scanStatus.bad++ : scanStatus.good++);
-     *     console.log(`${file} is ${(isInfected ? `infected with ${viruses}` : 'ok')}.`);
-     *     console.log('Scan Status: ', `${(scanStatus.bad + scanStatus.good)}/${files.length}`);
-     * });
-     *
-     * // Async/Await method
-     * const {goodFiles, badFiles, errors, viruses} = await clamscan.scanFiles(files);
      */
     scanFiles(files = [], endCb = null, fileCb = null) {
         const self = this;
@@ -1228,13 +1091,13 @@ class NodeClam {
         // Verify third param, if supplied, is a function
         if (fileCb && typeof fileCb !== 'function')
             throw new NodeClamError(
-                'Invalid file callback provided to `scanFiles`. Third paramter, if provided, must be a function!'
+                'Invalid file callback provided to `scanFiles`. Third parameter, if provided, must be a function!'
             );
 
         // Verify second param, if supplied, is a function
         if (endCb && typeof endCb !== 'function') {
             throw new NodeClamError(
-                'Invalid end-scan callback provided to `scanFiles`. Second paramter, if provided, must be a function!'
+                'Invalid end-scan callback provided to `scanFiles`. Second parameter, if provided, must be a function!'
             );
         } else if (endCb && typeof endCb === 'function') {
             hasCb = true;
@@ -1244,7 +1107,7 @@ class NodeClam {
         if (files && Array.isArray(files) && files.length > 1000000)
             throw new NodeClamError(
                 { numFiles: files.length },
-                'NodeClam has haulted because more than 1 million files were about to be scanned. We suggest taking a different approach.'
+                'NodeClam has halted because more than 1 million files were about to be scanned. We suggest taking a different approach.'
             );
 
         // At this point for a hybrid Promise/CB API to work, everything needs to be wrapped
@@ -1273,20 +1136,24 @@ class NodeClam {
                     while (theFiles.length > 0) {
                         const chunk = theFiles.length > chunkSize ? theFiles.splice(0, chunkSize) : theFiles.splice(0);
 
-                        const chunkPromises = chunk.map(async (file) => {
+                        const chunkResults = [];
+
+                        for (const file of chunk) {
                             try {
                                 const result = await this.isInfected(file);
-                                console.log('RESULT: ', result);
 
                                 scannedCount++;
                                 const progressRatio = ((scannedCount / numFiles) * 100).toFixed(2);
 
                                 fileCb(null, file, result.isInfected, result.viruses, scannedCount, progressRatio);
 
-                                return { ...result, file };
+                                chunkResults.push({ ...result, file });
                             } catch (err) {
-                                const error = err.data.err ?? err;
-                                console.log('ERROR IN SCAN FILES: ', { err, error });
+                                let error = err;
+                                if (err instanceof NodeClamError && err.data?.err instanceof Error) {
+                                    error = err.data.err;
+                                }
+
                                 if (isPermissionError(error)) {
                                     console.warn(`File ${file} skipped due to EBUSY or permission issue.`);
                                     scannedCount++;
@@ -1294,18 +1161,13 @@ class NodeClam {
 
                                     fileCb(null, file, false, [], scannedCount, progressRatio);
 
-                                    return { file, isInfected: false, viruses: [] };
+                                    chunkResults.push({ file, isInfected: false, viruses: [] });
+                                } else {
+                                    console.error(`Error scanning file ${file}:`, error);
+                                    reject(error);
                                 }
-
-                                console.error(`Error scanning file ${file}:`, err);
-                                throw err;
                             }
-                        });
-
-                        // Esperar a que termine el chunk entero
-                        // (pero el callback se ha llamado ya en cada promesa)
-                        // eslint-disable-next-line no-await-in-loop
-                        const chunkResults = await Promise.all(chunkPromises);
+                        }
 
                         results = results.concat(chunkResults);
                     }
@@ -1366,9 +1228,6 @@ class NodeClam {
                         { numFiles: files.length, origNumFiles },
                         "You've specified at least one invalid item to the files list (first parameter) of the `scanFiles` method."
                     );
-                    // console.log("Files: ", files);
-                    // console.log("Num Files: ", files.length);
-                    // console.log("Original Num Files: ", origNumFiles);
                     return hasCb ? endCb(err, [], [], {}, []) : reject(err);
                 }
             }
@@ -1386,11 +1245,6 @@ class NodeClam {
                     return hasCb
                         ? endCb(null, emptyResult.goodFiles, emptyResult.badFiles, emptyResult.viruses)
                         : resolve(emptyResult);
-                    // const err = new NodeClamError(
-                    //     { files, settings: this.settings },
-                    //     'No files provided to scan and no file list provided!'
-                    // );
-                    // return hasCb ? endCb(err, [], [], {}, []) : reject(err);
                 }
 
                 // If the file list is specified, read it in and scan listed files...
@@ -1405,11 +1259,7 @@ class NodeClam {
                     return hasCb ? endCb(err, [], [], {}, []) : reject(err);
                 }
             }
-            try {
-                return await doScan(files);
-            } catch (error) {
-                reject(error);
-            }
+            return doScan(files);
         });
     }
 
@@ -1485,6 +1335,7 @@ class NodeClam {
             if (this.settings.scanRecursively === true && (typeof fileCb === 'function' || !hasCb)) {
                 try {
                     const files = await getFiles(path, true);
+
                     const { goodFiles, badFiles, viruses, errors } = await this.scanFiles(files, null, fileCb);
                     return hasCb
                         ? endCb(null, goodFiles, badFiles, viruses)
@@ -1526,26 +1377,10 @@ class NodeClam {
      * rs.push('barrrrr');
      * rs.push(null);
      *
-     * // Callback Example
-     * clamscan.scanStream(stream, (err, { isInfected, viruses }) => {
-     *     if (err) return console.error(err);
-     *     if (isInfected) return console.log('Stream is infected! Booo!', viruses);
-     *     console.log('Stream is not infected! Yay!');
-     * });
-     *
      * // Async/Await Example
      * const { isInfected, viruses } = await clamscan.scanStream(stream);
      */
-    scanStream(stream, cb) {
-        let hasCb = false;
-
-        // Verify second param, if supplied, is a function
-        if (cb && typeof cb !== 'function')
-            throw new NodeClamError('Invalid cb provided to scanStream. Second paramter must be a function!');
-
-        // Making things simpler
-        if (cb && typeof cb === 'function') hasCb = true;
-
+    scanStream(stream) {
         // eslint-disable-next-line consistent-return
         return new Promise(async (resolve, reject) => {
             let finished = false;
@@ -1553,7 +1388,7 @@ class NodeClam {
             // Verify stream is passed to the first parameter
             if (!this._isReadableStream(stream)) {
                 const err = new NodeClamError({ stream }, 'Invalid stream provided to scan.');
-                return hasCb ? cb(err, null) : reject(err);
+                reject(err);
             }
             if (this.settings.debugMode) console.log(`${this.debugLabel}: Provided stream is readable.`);
 
@@ -1563,118 +1398,133 @@ class NodeClam {
                     { clamdscanSettings: this.settings.clamdscan },
                     'Invalid information provided to connect to clamav service. A unix socket or port (+ optional host) is required!'
                 );
-                return hasCb ? cb(err, null) : reject(err);
+                reject(err);
             }
 
-            // Create socket variable
-            let socket;
+            // Get an instance of our stream transform that coddles
+            // the chunks from the incoming stream to what ClamAV wants
+            const transform = new NodeClamTransform({}, this.settings.debugMode);
+            // Get a socket
+            const socket = await this._initSocket('scanStream');
+            // Pipe the stream through our transform and into the ClamAV socket
+            // stream.pipe(transform).pipe(socket);
+            transform
+                // Writing data into ClamAV socket
+                .on('data', (data) => {
+                    socket.write(data);
+                })
+                // The transform stream has dried up
+                .on('end', () => {
+                    if (this.settings.debugMode) console.log(`${this.debugLabel}: The transform stream has ended.`);
+                })
+                .on('error', (err) => {
+                    console.error(`${this.debugLabel}: Error emitted from transform stream: `, err);
+                    socket.end();
+                    const error = new NodeClamError(
+                        { err },
+                        `No files provided and file list was provided but could not be found! ${err}`
+                    );
+                    reject(error);
+                });
 
-            // Get a socket client
-            try {
-                // Get an instance of our stream tranform that coddles
-                // the chunks from the incoming stream to what ClamAV wants
-                const transform = new NodeClamTransform({}, this.settings.debugMode);
+            // Setup the listeners for the stream
+            stream
+                // The stream is writting data into transform stream
+                .on('data', (data) => {
+                    transform.write(data);
+                })
+                // The stream has dried up
+                .on('end', () => {
+                    if (this.settings.debugMode) console.log(`${this.debugLabel}: The input stream has dried up.`);
+                    finished = true;
+                    transform.end();
+                })
+                // There was an error with the stream (ex. uploader closed browser)
+                .on('error', (err) => {
+                    if (this.settings.debugMode) {
+                        console.log(
+                            `${this.debugLabel}: There was an error with the input stream(maybe uploader closed browser ?).`,
+                            err
+                        );
+                    }
+                    if (isPermissionError(err)) {
+                        resolve({
+                            isInfected: false,
+                            viruses: [],
+                            file: null,
+                            resultString: 'stream: OK\x00',
+                            timeout: false,
+                        });
+                    } else {
+                        reject(err);
+                    }
+                });
+            // Where to buffer string response (not a real "Buffer", per se...)
+            const chunks = [];
+            // Read output of the ClamAV socket to see what it's saying and when
+            // it's done saying it (FIN)
+            socket
+                // ClamAV is sending stuff to us
+                .on('data', (chunk) => {
+                    if (this.settings.debugMode) console.log(`${this.debugLabel}: Received output from ClamAV Socket.`);
+                    if (!stream.isPaused()) stream.pause();
+                    chunks.push(chunk);
+                })
+                .on('close', (hadError) => {
+                    socket.end();
+                    if (this.settings.debugMode)
+                        console.log(`${this.debugLabel}: ClamAV socket has been closed!`, hadError);
+                })
+                .on('error', (err) => {
+                    console.log('ERROR FROM SOCKET: ', err);
+                    console.error(`${this.debugLabel}: Error emitted from ClamAV socket: `, err);
+                    socket.end();
+                    transform.destroy();
+                    const error = new NodeClamError(
+                        { err },
+                        `No files provided and file list was provided but could not be found! ${err}`
+                    );
 
-                // Get a socket
-                socket = await this._initSocket('scanStream');
+                    if (isPermissionError(error)) {
+                        resolve({
+                            isInfected: false,
+                            viruses: [],
+                            file: null,
+                            resultString: 'stream: OK\x00',
+                            timeout: false,
+                        });
+                    } else {
+                        reject(error);
+                    }
+                })
+                // ClamAV is done sending stuff to us
+                .on('end', () => {
+                    if (this.settings.debugMode) console.log(`${this.debugLabel}: ClamAV is done scanning.`);
+                    // Fully close up the socket
+                    socket.destroy();
+                    transform.destroy();
+                    // Concat all the response chunks into a single buffer
+                    const response = Buffer.concat(chunks);
+                    // If the scan didn't finish, throw error
+                    if (!finished) {
+                        const err = new NodeClamError(`Scan aborted. Reply from server: ${response.toString('utf8')} `);
+                        reject(err);
+                    }
+                    // The scan finished
+                    if (this.settings.debugMode)
+                        console.log(`${this.debugLabel}: Raw Response:  ${response.toString('utf8')} `);
+                    const result = this._processResult(response.toString('utf8'), null);
 
-                // Pipe the stream through our transform and into the ClamAV socket
-                // stream.pipe(transform).pipe(socket);
-                transform
-                    // Writing data into ClamAV socket
-                    .on('data', (data) => {
-                        socket.write(data);
-                    })
-                    // The transform stream has dried up
-                    .on('end', () => {
-                        if (this.settings.debugMode) console.log(`${this.debugLabel}: The transform stream has ended.`);
-                    })
-                    .on('error', (err) => {
-                        console.error(`${this.debugLabel}: Error emitted from transform stream: `, err);
-                        socket.end();
-                        return hasCb ? cb(err, null) : reject(err);
-                    });
+                    if (result instanceof Error) {
+                        const error = new NodeClamError(
+                            { err: result },
+                            `No files provided and file list was provided but could not be found! ${result}`
+                        );
 
-                // Setup the listeners for the stream
-                stream
-                    // The stream is writting data into transform stream
-                    .on('data', (data) => {
-                        transform.write(data);
-                    })
-                    // The stream has dried up
-                    .on('end', () => {
-                        if (this.settings.debugMode) console.log(`${this.debugLabel}: The input stream has dried up.`);
-                        finished = true;
-                        transform.end();
-                    })
-                    // There was an error with the stream (ex. uploader closed browser)
-                    .on('error', (err) => {
-                        if (this.settings.debugMode)
-                            console.log(
-                                `${this.debugLabel}: There was an error with the input stream(maybe uploader closed browser ?).`,
-                                err
-                            );
-                        return hasCb ? cb(err, null) : reject(err);
-                    });
-
-                // Where to buffer string response (not a real "Buffer", per se...)
-                const chunks = [];
-
-                // Read output of the ClamAV socket to see what it's saying and when
-                // it's done saying it (FIN)
-                socket
-                    // ClamAV is sending stuff to us
-                    .on('data', (chunk) => {
-                        if (this.settings.debugMode)
-                            console.log(`${this.debugLabel}: Received output from ClamAV Socket.`);
-                        if (!stream.isPaused()) stream.pause();
-                        chunks.push(chunk);
-                    })
-
-                    .on('close', (hadError) => {
-                        socket.end();
-                        if (this.settings.debugMode)
-                            console.log(`${this.debugLabel}: ClamAV socket has been closed!`, hadError);
-                    })
-
-                    .on('error', (err) => {
-                        console.error(`${this.debugLabel}: Error emitted from ClamAV socket: `, err);
-                        socket.end();
-                        transform.destroy();
-                        return hasCb ? cb(err, null) : reject(err);
-                    })
-
-                    // ClamAV is done sending stuff to us
-                    .on('end', () => {
-                        if (this.settings.debugMode) console.log(`${this.debugLabel}: ClamAV is done scanning.`);
-                        // Fully close up the socket
-                        socket.destroy();
-                        transform.destroy();
-
-                        // Concat all the response chunks into a single buffer
-                        const response = Buffer.concat(chunks);
-
-                        // If the scan didn't finish, throw error
-                        if (!finished) {
-                            const err = new NodeClamError(
-                                `Scan aborted. Reply from server: ${response.toString('utf8')} `
-                            );
-
-                            return hasCb ? cb(err, null) : reject(err);
-                        }
-
-                        // The scan finished
-                        if (this.settings.debugMode)
-                            console.log(`${this.debugLabel}: Raw Response:  ${response.toString('utf8')} `);
-                        const result = this._processResult(response.toString('utf8'), null);
-                        if (result instanceof Error) {
-                            return hasCb ? cb(result, null) : reject(result);
-                        }
-                        return hasCb ? cb(null, result) : resolve(result);
-                    });
-            } catch (err) {
-                return hasCb ? cb(err, null) : reject(err);
-            }
+                        reject(error);
+                    }
+                    resolve(result);
+                });
         });
     }
 }
