@@ -25,7 +25,6 @@ const { execFile } = require('child_process');
 const { Readable } = require('stream');
 const { Socket } = require('dgram');
 const fsPromises = require('fs').promises;
-const { stat } = require('fs/promises');
 const NodeClamError = require('./lib/NodeClamError');
 const NodeClamTransform = require('./lib/NodeClamTransform');
 const getFiles = require('./lib/getFiles');
@@ -54,8 +53,9 @@ class NodeClam {
      */
     constructor() {
         this.initialized = false;
-        this.debugLabel = 'node-clam';
+        this.debugLabel = 'inxt-clamScan';
         this.defaultScanner = 'clamdscan';
+        this.activeSockets = [];
 
         // Configuration Settings
         this.defaults = Object.freeze({
@@ -124,35 +124,6 @@ class NodeClam {
      * @param {Function} [cb = null] - Callback method. Prototype: `(err, <instance of NodeClam>)`
      * @returns {Promise<object>} An initated instance of NodeClam
      * @example
-     * const NodeClam = require('clamscan');
-     * const ClamScan = new NodeClam().init({
-     *     removeInfected: false,
-     *     quarantineInfected: false,
-     *     scanLog: null,
-     *     debugMode: false,
-     *     fileList: null,
-     *     scanRecursively: true,
-     *     clamscan: {
-     *         path: '/usr/bin/clamscan',
-     *         db: null,
-     *         scanArchives: true,
-     *         active: true
-     *     },
-     *     clamdscan: {
-     *         socket: false,
-     *         host: false,
-     *         port: false,
-     *         timeout: 60000,
-     *         localFallback: false,
-     *         path: '/usr/bin/clamdscan',
-     *         configFile: null,
-     *         multiscan: true,
-     *         reloadDb: false,
-     *         active: true,
-     *         bypassTest: false,
-     *     },
-     *     preference: 'clamdscan'
-     });
      */
     async init(options = {}, cb = null) {
         let hasCb = false;
@@ -578,6 +549,8 @@ class NodeClam {
             // Set the socket timeout if specified
             if (this.settings.clamdscan.timeout) client.setTimeout(this.settings.clamdscan.timeout);
 
+            this.activeSockets.push(client);
+
             // Setup socket client listeners
             client
                 .on('connect', () => {
@@ -615,6 +588,19 @@ class NodeClam {
                     if (this.settings.debugMode) console.error(`${this.debugLabel}: Socket/Host connection failed:`, e);
                     reject(e);
                 });
+        });
+    }
+
+    closeAllSockets() {
+        return new Promise((resolve) => {
+            for (const socket of this.activeSockets) {
+                if (!socket.destroyed) {
+                    console.log('DESTROYING SOCKETS');
+                    socket.destroy();
+                }
+            }
+            this.activeSockets = [];
+            resolve('');
         });
     }
 
@@ -1016,44 +1002,22 @@ class NodeClam {
         }
     }
 
-    async binPackFiles(filePaths, numBins = 10) {
-        const filesWithSize = [];
-        for (const path of filePaths) {
-            try {
-                const { size } = await stat(path);
-                filesWithSize.push({ path, size });
-            } catch (err) {
-                // Si da error stat, lo tratamos como size=0 o lo excluimos
-                filesWithSize.push({ path, size: 0 });
-            }
-        }
+    async scanFile(filePath) {
+        try {
+            const scannedFile = await this.isInfected(filePath);
 
-        filesWithSize.sort((a, b) => b.size - a.size);
-
-        const bins = [];
-        for (let i = 0; i < numBins; i++) {
-            bins.push({
-                totalSize: 0,
-                files: [],
-            });
-        }
-
-        for (const fileObj of filesWithSize) {
-            let bestBinIndex = 0;
-            let minSize = Infinity;
-
-            for (let i = 0; i < numBins; i++) {
-                if (bins[i].totalSize < minSize) {
-                    minSize = bins[i].totalSize;
-                    bestBinIndex = i;
-                }
+            return scannedFile;
+        } catch (err) {
+            let error = err;
+            if (err instanceof NodeClamError && err.data?.err instanceof Error) {
+                error = err.data.err;
             }
 
-            bins[bestBinIndex].files.push(fileObj);
-            bins[bestBinIndex].totalSize += fileObj.size;
+            if (!isPermissionError(error)) {
+                console.error(`Error scanning file ${filePath}:`, error);
+                throw error;
+            }
         }
-
-        return bins.map((bin) => bin.files);
     }
 
     /**
