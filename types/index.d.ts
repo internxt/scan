@@ -148,6 +148,18 @@ declare namespace NodeClam {
          */
         reset: (options?: ClamScanSettings, cb?: (err: Error | null, instance: any) => void) => Promise<ClamScanner>;
     }
+
+    interface NodeClamError extends Error {
+        data: {
+            is_infected: string;
+            viruses: string[];
+        };
+        date: Date;
+    }
+
+    type Response<T> = T & {
+        viruses: string[];
+    };
 }
 
 declare class NodeClam {
