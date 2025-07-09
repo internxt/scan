@@ -17,9 +17,9 @@
     ],
     "scripts": {
         "docs": "jsdoc2md index.js lib/* > API.md",
-        "format": "node_modules/.bin/prettier '**/*.{js,json}' --write",
-        "lint": "node_modules/.bin/eslint '**/*.js'",
-        "lint:fix": "node_modules/.bin/eslint --fix '**/*.js'",
+        "format": "prettier '**/*.{js,json}' --write",
+        "lint": "eslint '**/*.js'",
+        "lint:fix": "eslint --fix '**/*.js'",
         "test": "make test"
     },
     "keywords": [
